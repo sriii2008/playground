@@ -1,0 +1,140 @@
+@import "tailwindcss";
+
+@layer base {
+  :root,
+  [data-theme="lavender"] {
+    --bg-chrome: #f2effa;
+    --bg-sidebar: #f7f5fc;
+    --bg-canvas: #fbfafd;
+    --bg-card: #ffffff;
+    --bg-input: #f5f3fa;
+    --border-subtle: #e7e2f3;
+    --accent: #7c66dc;
+    --accent-hover: #6952cd;
+    --accent-soft: #eae4fa;
+    --accent-muted: #d8cef6;
+    --text-primary: #1f1b2e;
+    --text-secondary: #68627d;
+    --text-muted: #948ea8;
+    --statusbar-bg: #7c66dc;
+  }
+
+  [data-theme="mint"] {
+    --bg-chrome: #eaf5f0;
+    --bg-sidebar: #f2f9f6;
+    --bg-canvas: #f9fcfa;
+    --bg-card: #ffffff;
+    --bg-input: #eef7f3;
+    --border-subtle: #d8ece3;
+    --accent: #3b9b78;
+    --accent-hover: #2f8566;
+    --accent-soft: #dcf2ea;
+    --accent-muted: #bfe6d7;
+    --text-primary: #182b24;
+    --text-secondary: #536e63;
+    --text-muted: #829c91;
+    --statusbar-bg: #3b9b78;
+  }
+
+  [data-theme="rose"] {
+    --bg-chrome: #faeeef;
+    --bg-sidebar: #fdf5f6;
+    --bg-canvas: #fffafb;
+    --bg-card: #ffffff;
+    --bg-input: #faf0f1;
+    --border-subtle: #f1dce0;
+    --accent: #d4687a;
+    --accent-hover: #bf5365;
+    --accent-soft: #fae1e5;
+    --accent-muted: #f3c8cf;
+    --text-primary: #2d191d;
+    --text-secondary: #76585e;
+    --text-muted: #a2858b;
+    --statusbar-bg: #d4687a;
+  }
+
+  [data-theme="sky"] {
+    --bg-chrome: #ebf3fb;
+    --bg-sidebar: #f3f8fd;
+    --bg-canvas: #fafcff;
+    --bg-card: #ffffff;
+    --bg-input: #eef5fc;
+    --border-subtle: #dae7f5;
+    --accent: #4c84d4;
+    --accent-hover: #3970bf;
+    --accent-soft: #ddebfa;
+    --accent-muted: #c2dbf6;
+    --text-primary: #182436;
+    --text-secondary: #556882;
+    --text-muted: #8496ad;
+    --statusbar-bg: #4c84d4;
+  }
+
+  [data-theme="butter"] {
+    --bg-chrome: #faf3e6;
+    --bg-sidebar: #fdf9f0;
+    --bg-canvas: #fffdf9;
+    --bg-card: #ffffff;
+    --bg-input: #f9f3e8;
+    --border-subtle: #efe3cb;
+    --accent: #c58632;
+    --accent-hover: #ad7222;
+    --accent-soft: #f6e7cc;
+    --accent-muted: #edd4a7;
+    --text-primary: #2d2315;
+    --text-secondary: #75654e;
+    --text-muted: #a19179;
+    --statusbar-bg: #c58632;
+  }
+
+  body {
+    font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+    color: var(--text-primary);
+    background-color: var(--bg-canvas);
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: "JetBrains Mono", monospace;
+  }
+}
+
+/* Custom Range Slider matching Figma IDE Inspector */
+input[type="range"].playground-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 8px;
+  border-radius: 9999px;
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"].playground-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: var(--accent);
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  transition: transform 150ms ease;
+}
+
+input[type="range"].playground-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+input[type="range"].playground-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: var(--accent);
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
