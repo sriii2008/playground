@@ -22,6 +22,8 @@ export interface ProjectAttachment {
   sizeBytes: number;
   mimeType: string;
   uploadedAt: string;
+  storageId?: string;
+  fileUrl?: string;
   dataUrl?: string;
 }
 
@@ -67,6 +69,9 @@ export interface CertificateItem {
   issuer: string;
   date: string;
   format: CertificateFormat;
+  sizeBytes?: number;
+  storageId?: string;
+  fileUrl?: string;
   dataUrl?: string;
   fileName?: string;
 }
@@ -91,6 +96,8 @@ export interface UserProfile {
   portfolio: string;
   resumeLink: string;
   resumeFileName?: string;
+  resumeSizeBytes?: number;
+  resumeFileUrl?: string;
   resumeDataUrl?: string;
   avatarDataUrl?: string;
 }

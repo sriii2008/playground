@@ -239,3 +239,56 @@ export function triggerCsvDownload(workspace: UserWorkspaceData): void {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+export interface UploadedFileResponse {
+  storageId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  fileUrl: string;
+}
+
+export async function uploadWorkspaceFile(params: {
+  username: string;
+  file: File;
+  projectId?: string;
+}): Promise<UploadedFileResponse> {
+  const { username, file, projectId } = params;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/octet-stream',
+    'X-File-Name': encodeURIComponent(file.name),
+    'X-Mime-Type': file.type || 'application/octet-stream',
+  };
+  if (projectId) {
+    headers['X-Project-Id'] = projectId;
+  }
+
+  const res = await fetch(`/api/uploads/${encodeURIComponent(username)}`, {
+    method: 'POST',
+    headers,
+    body: file,
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || 'File upload failed.');
+  }
+  return data as UploadedFileResponse;
+}
+
+export async function deleteWorkspaceFile(
+  username: string,
+  storageId?: string
+): Promise<void> {
+  if (!storageId) return;
+  try {
+    await fetch(
+      `/api/files/${encodeURIComponent(username)}/${encodeURIComponent(storageId)}`,
+      { method: 'DELETE' }
+    );
+  } catch {
+    // ignore network error
+  }
+}
+

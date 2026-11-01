@@ -1,10 +1,20 @@
+import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDemoWonderWorkspace, createEmptyWorkspace } from './src/data/seedData.ts';
-import { generateUserHistoryCsv, validateAuthCredentials } from './src/utils/playgroundLogic.ts';
+import {
+  calculateProjectStorageBytes,
+  calculateUserStorageBytes,
+  generateUserHistoryCsv,
+  MAX_FILE_BYTES,
+  MAX_PROJECT_BYTES,
+  MAX_USER_BYTES,
+  validateAuthCredentials,
+  validateUploadQuota,
+} from './src/utils/playgroundLogic.ts';
 import type { StoredAccount, UserWorkspaceData } from './src/types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,7 +22,20 @@ const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.join(__dirname, 'data');
 const CSV_DIR = path.join(DATA_DIR, 'csv');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
+const UPLOADS_INDEX_FILE = path.join(DATA_DIR, 'uploads_index.json');
+
+interface StoredFileMeta {
+  storageId: string;
+  username: string;
+  projectId?: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  relativeDiskPath: string;
+  uploadedAt: string;
+}
 
 function hashPassword(password: string): string {
   return crypto.createHash('sha256').update(`playground_salt_v1:${password}`).digest('hex');
@@ -24,6 +47,9 @@ function ensureStorageInitialized(): Record<string, StoredAccount> {
   }
   if (!fs.existsSync(CSV_DIR)) {
     fs.mkdirSync(CSV_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   }
 
   if (fs.existsSync(ACCOUNTS_FILE)) {
@@ -65,16 +91,183 @@ function writeUserCsvFile(username: string, workspace: UserWorkspaceData): strin
   return csvPath;
 }
 
+function loadUploadsIndex(): Record<string, StoredFileMeta> {
+  if (fs.existsSync(UPLOADS_INDEX_FILE)) {
+    try {
+      const raw = fs.readFileSync(UPLOADS_INDEX_FILE, 'utf-8');
+      const parsed = JSON.parse(raw) as Record<string, StoredFileMeta>;
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // reset if unreadable
+    }
+  }
+  return {};
+}
+
+function saveUploadsIndex(index: Record<string, StoredFileMeta>): void {
+  fs.writeFileSync(UPLOADS_INDEX_FILE, JSON.stringify(index, null, 2), 'utf-8');
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '60mb' }));
-
   let accounts = ensureStorageInitialized();
+  let uploadsIndex = loadUploadsIndex();
 
   const findAccountKey = (username: string): string | undefined =>
     Object.keys(accounts).find((k) => k.toLowerCase() === username.trim().toLowerCase());
+
+  // Binary file upload endpoint (up to 50 MB per file, 150 MB per project, 500 MB per user)
+  app.post(
+    '/api/uploads/:username',
+    express.raw({ type: 'application/octet-stream', limit: '55mb' }),
+    (req: Request, res: Response) => {
+      const key = findAccountKey(String(req.params.username || ''));
+      if (!key) {
+        res.status(404).json({ error: 'User workspace not found.' });
+        return;
+      }
+
+      const bodyBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const rawName = decodeURIComponent(String(req.header('x-file-name') || 'document.pdf'));
+      const mimeType = String(req.header('x-mime-type') || 'application/octet-stream');
+      const projectId = String(req.header('x-project-id') || '').trim() || undefined;
+
+      const account = accounts[key];
+      const currentUserBytes = calculateUserStorageBytes(account.workspace);
+      const targetProject = projectId
+        ? account.workspace.projects.find((p) => p.id === projectId)
+        : undefined;
+      const currentProjectBytes = targetProject
+        ? calculateProjectStorageBytes(targetProject)
+        : undefined;
+
+      const quotaCheck = validateUploadQuota({
+        fileSizeBytes: bodyBuf.length,
+        currentProjectBytes,
+        currentUserBytes,
+      });
+
+      if (!quotaCheck.allowed) {
+        res.status(413).json({ error: quotaCheck.error });
+        return;
+      }
+
+      const safeUser = account.username.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
+      const userUploadDir = path.join(UPLOADS_DIR, safeUser);
+      if (!fs.existsSync(userUploadDir)) {
+        fs.mkdirSync(userUploadDir, { recursive: true });
+      }
+
+      const storageId = `file_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const safeFile = rawName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+      const diskFileName = `${storageId}_${safeFile}`;
+      const fullDiskPath = path.join(userUploadDir, diskFileName);
+      fs.writeFileSync(fullDiskPath, bodyBuf);
+
+      const meta: StoredFileMeta = {
+        storageId,
+        username: account.username,
+        projectId,
+        fileName: rawName,
+        mimeType,
+        sizeBytes: bodyBuf.length,
+        relativeDiskPath: path.join(safeUser, diskFileName),
+        uploadedAt: new Date().toISOString().slice(0, 10),
+      };
+      uploadsIndex[storageId] = meta;
+      saveUploadsIndex(uploadsIndex);
+
+      res.status(201).json({
+        storageId,
+        fileName: rawName,
+        mimeType,
+        sizeBytes: bodyBuf.length,
+        uploadedAt: meta.uploadedAt,
+        fileUrl: `/api/files/${encodeURIComponent(account.username)}/${encodeURIComponent(
+          storageId
+        )}`,
+      });
+    }
+  );
+
+  app.use(express.json({ limit: '60mb' }));
+
+  app.get('/api/storage/status/:username', (req: Request, res: Response) => {
+    const key = findAccountKey(String(req.params.username || ''));
+    if (!key) {
+      res.status(404).json({ error: 'User workspace not found.' });
+      return;
+    }
+    const account = accounts[key];
+    const userUsedBytes = calculateUserStorageBytes(account.workspace);
+    const projectBytesById: Record<string, number> = {};
+    for (const p of account.workspace.projects) {
+      projectBytesById[p.id] = calculateProjectStorageBytes(p);
+    }
+
+    const geminiKey = process.env.GEMINI_API_KEY || '';
+    const apiKeyAttached = Boolean(geminiKey && geminiKey !== 'MY_GEMINI_API_KEY');
+
+    res.json({
+      storageReady: fs.existsSync(UPLOADS_DIR),
+      apiKeyAttached,
+      limits: {
+        maxFileBytes: MAX_FILE_BYTES,
+        maxProjectBytes: MAX_PROJECT_BYTES,
+        maxUserBytes: MAX_USER_BYTES,
+      },
+      usage: {
+        userUsedBytes,
+        remainingUserBytes: Math.max(0, MAX_USER_BYTES - userUsedBytes),
+        projectBytesById,
+      },
+    });
+  });
+
+  app.get('/api/files/:username/:storageId', (req: Request, res: Response) => {
+    const storageId = String(req.params.storageId || '');
+    const meta = uploadsIndex[storageId];
+    if (!meta) {
+      res.status(404).send('File not found');
+      return;
+    }
+    const fullPath = path.join(UPLOADS_DIR, meta.relativeDiskPath);
+    if (!fs.existsSync(fullPath)) {
+      res.status(404).send('Stored file missing on disk');
+      return;
+    }
+
+    const forceDownload = req.query.download === '1';
+    res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
+    res.setHeader(
+      'Content-Disposition',
+      `${forceDownload ? 'attachment' : 'inline'}; filename="${meta.fileName.replace(
+        /"/g,
+        ''
+      )}"`
+    );
+    res.sendFile(fullPath);
+  });
+
+  app.delete('/api/files/:username/:storageId', (req: Request, res: Response) => {
+    const storageId = String(req.params.storageId || '');
+    const meta = uploadsIndex[storageId];
+    if (meta) {
+      const fullPath = path.join(UPLOADS_DIR, meta.relativeDiskPath);
+      if (fs.existsSync(fullPath)) {
+        try {
+          fs.unlinkSync(fullPath);
+        } catch {
+          // ignore unlink error
+        }
+      }
+      delete uploadsIndex[storageId];
+      saveUploadsIndex(uploadsIndex);
+    }
+    res.json({ ok: true });
+  });
 
   app.get('/api/accounts', (_req: Request, res: Response) => {
     const users = Object.values(accounts).map((acc) => ({

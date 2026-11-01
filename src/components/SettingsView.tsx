@@ -4,6 +4,7 @@ import {
   Copy,
   Download,
   FileSpreadsheet,
+  HardDrive,
   KeyRound,
   Palette,
   Share2,
@@ -17,7 +18,11 @@ import {
 } from '../types';
 import { PASTEL_THEMES } from '../data/seedData';
 import {
+  calculateProjectStorageBytes,
+  calculateUserStorageBytes,
+  formatFileSize,
   generateUserHistoryCsv,
+  MAX_USER_BYTES,
   parseCsvLine,
   slugifyProjectName,
 } from '../utils/playgroundLogic';
@@ -280,6 +285,66 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             );
           })}
         </div>
+      </section>
+
+      {/* 1.5 Workspace File Storage Capacity */}
+      <section
+        aria-label="Workspace file storage capacity"
+        className="bg-white border border-[var(--border-subtle)] rounded-2xl p-6 space-y-4"
+      >
+        {(() => {
+          const usedBytes = calculateUserStorageBytes(workspace);
+          const pct = Math.min(100, Math.round((usedBytes / MAX_USER_BYTES) * 100));
+          return (
+            <>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[15px] font-semibold text-[var(--text-primary)]">
+                  <HardDrive className="w-4 h-4 text-[var(--accent)]" />
+                  <h2>Workspace file storage</h2>
+                </div>
+                <span className="text-xs font-mono tabular-nums text-[var(--text-secondary)]">
+                  {formatFileSize(usedBytes)} / 500.00 MB user quota ({pct}%)
+                </span>
+              </div>
+
+              <div className="w-full h-2 rounded-full bg-[var(--accent-soft)] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)] tabular-nums">
+                <span>Max single file: 50 MB</span>
+                <span aria-hidden="true">·</span>
+                <span>Per-project capacity: 150 MB</span>
+                <span aria-hidden="true">·</span>
+                <span>Total per-user capacity: 500 MB</span>
+              </div>
+
+              {workspace.projects.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                  {workspace.projects.map((p) => {
+                    const pBytes = calculateProjectStorageBytes(p);
+                    return (
+                      <div
+                        key={p.id}
+                        className="px-3.5 py-2.5 rounded-xl bg-[var(--bg-input)] flex items-center justify-between gap-2 text-xs"
+                      >
+                        <span className="font-medium text-[var(--text-primary)] truncate">
+                          {p.name}
+                        </span>
+                        <span className="font-mono tabular-nums text-[var(--text-secondary)] shrink-0">
+                          {formatFileSize(pBytes)} / 150 MB
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          );
+        })()}
       </section>
 
       {/* 2. User History (Excel / CSV Live Spreadsheet Vault) */}

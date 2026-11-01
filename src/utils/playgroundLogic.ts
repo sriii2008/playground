@@ -399,3 +399,99 @@ export function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
+
+export const MAX_FILE_BYTES = 50 * 1024 * 1024; // 50 MB per single file
+export const MAX_PROJECT_BYTES = 150 * 1024 * 1024; // 150 MB per project
+export const MAX_USER_BYTES = 500 * 1024 * 1024; // 500 MB total per user
+
+export function calculateProjectStorageBytes(project: ProjectItem): number {
+  return project.attachments.reduce((sum, att) => sum + (att.sizeBytes || 0), 0);
+}
+
+export function calculateUserStorageBytes(workspace: UserWorkspaceData): number {
+  const projectsTotal = workspace.projects.reduce(
+    (sum, proj) => sum + calculateProjectStorageBytes(proj),
+    0
+  );
+  const certsTotal = workspace.certificates.reduce(
+    (sum, cert) => sum + (cert.sizeBytes || 0),
+    0
+  );
+  const resumeBytes = workspace.profile.resumeSizeBytes || 0;
+  return projectsTotal + certsTotal + resumeBytes;
+}
+
+export interface QuotaCheckResult {
+  allowed: boolean;
+  error?: string;
+  remainingProjectBytes?: number;
+  remainingUserBytes: number;
+}
+
+export function validateUploadQuota(params: {
+  fileSizeBytes: number;
+  currentProjectBytes?: number;
+  currentUserBytes: number;
+}): QuotaCheckResult {
+  const { fileSizeBytes, currentProjectBytes, currentUserBytes } = params;
+
+  if (fileSizeBytes <= 0) {
+    return {
+      allowed: false,
+      error: 'Selected file is empty.',
+      remainingProjectBytes:
+        currentProjectBytes !== undefined
+          ? Math.max(0, MAX_PROJECT_BYTES - currentProjectBytes)
+          : undefined,
+      remainingUserBytes: Math.max(0, MAX_USER_BYTES - currentUserBytes),
+    };
+  }
+
+  if (fileSizeBytes > MAX_FILE_BYTES) {
+    return {
+      allowed: false,
+      error: `File size (${formatFileSize(fileSizeBytes)}) exceeds the 50 MB single-file limit.`,
+      remainingProjectBytes:
+        currentProjectBytes !== undefined
+          ? Math.max(0, MAX_PROJECT_BYTES - currentProjectBytes)
+          : undefined,
+      remainingUserBytes: Math.max(0, MAX_USER_BYTES - currentUserBytes),
+    };
+  }
+
+  if (
+    currentProjectBytes !== undefined &&
+    currentProjectBytes + fileSizeBytes > MAX_PROJECT_BYTES
+  ) {
+    const avail = Math.max(0, MAX_PROJECT_BYTES - currentProjectBytes);
+    return {
+      allowed: false,
+      error: `Exceeds the 150 MB per-project storage limit (${formatFileSize(avail)} remaining in this project).`,
+      remainingProjectBytes: avail,
+      remainingUserBytes: Math.max(0, MAX_USER_BYTES - currentUserBytes),
+    };
+  }
+
+  if (currentUserBytes + fileSizeBytes > MAX_USER_BYTES) {
+    const avail = Math.max(0, MAX_USER_BYTES - currentUserBytes);
+    return {
+      allowed: false,
+      error: `Exceeds your 500 MB total user storage quota (${formatFileSize(avail)} remaining).`,
+      remainingProjectBytes:
+        currentProjectBytes !== undefined
+          ? Math.max(0, MAX_PROJECT_BYTES - currentProjectBytes)
+          : undefined,
+      remainingUserBytes: avail,
+    };
+  }
+
+  return {
+    allowed: true,
+    remainingProjectBytes:
+      currentProjectBytes !== undefined
+        ? MAX_PROJECT_BYTES - (currentProjectBytes + fileSizeBytes)
+        : undefined,
+    remainingUserBytes: MAX_USER_BYTES - (currentUserBytes + fileSizeBytes),
+  };
+}
+

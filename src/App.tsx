@@ -16,8 +16,12 @@ import {
   UserWorkspaceData,
 } from './types';
 import { createDemoWonderWorkspace } from './data/seedData';
-import { slugifyProjectName } from './utils/playgroundLogic';
 import {
+  calculateUserStorageBytes,
+  slugifyProjectName,
+} from './utils/playgroundLogic';
+import {
+  deleteWorkspaceFile,
   getSavedSessionUsername,
   loadUserWorkspace,
   saveUserWorkspace,
@@ -272,6 +276,13 @@ export default function App() {
   const handleDeleteProject = useCallback(
     (projectId: string) => {
       const target = workspace.projects.find((p) => p.id === projectId);
+      if (target && activeUsername) {
+        for (const att of target.attachments) {
+          if (att.storageId) {
+            deleteWorkspaceFile(activeUsername, att.storageId);
+          }
+        }
+      }
       commitWorkspace(
         (prev) => ({
           ...prev,
@@ -527,6 +538,8 @@ export default function App() {
 
       {activeProject && (
         <ProjectDetailView
+          username={workspace.profile.username || activeUsername}
+          totalUserStorageBytes={calculateUserStorageBytes(workspace)}
           project={activeProject}
           onUpdateProject={handleUpdateProject}
           onDeleteProject={handleDeleteProject}

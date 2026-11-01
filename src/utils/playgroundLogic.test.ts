@@ -5,10 +5,16 @@ import {
   computeDashboardMetrics,
   escapeCsvCell,
   generateUserHistoryCsv,
+  MAX_FILE_BYTES,
+  MAX_PROJECT_BYTES,
+  MAX_USER_BYTES,
   normalizeExternalUrl,
   parseCsvLine,
   slugifyProjectName,
   validateAuthCredentials,
+  validateUploadQuota,
+  calculateProjectStorageBytes,
+  calculateUserStorageBytes,
 } from './playgroundLogic';
 import { createDemoWonderWorkspace } from '../data/seedData';
 
@@ -87,3 +93,48 @@ test('normalizeExternalUrl prepends https when scheme missing', () => {
   assert.equal(normalizeExternalUrl('https://github.com/u/repo'), 'https://github.com/u/repo');
   assert.equal(normalizeExternalUrl('   '), '');
 });
+
+test('storage quota helpers enforce 50MB file, 150MB project, and 500MB user limits', () => {
+  const demo = createDemoWonderWorkspace();
+  const auroraBytes = calculateProjectStorageBytes(demo.projects[0]);
+  assert.equal(auroraBytes, 3420160);
+
+  const totalSeededBytes = calculateUserStorageBytes(demo);
+  assert.equal(totalSeededBytes, 3420160 + 6184960);
+
+  // Valid 25 MB upload
+  const ok = validateUploadQuota({
+    fileSizeBytes: 25 * 1024 * 1024,
+    currentProjectBytes: 10 * 1024 * 1024,
+    currentUserBytes: 50 * 1024 * 1024,
+  });
+  assert.equal(ok.allowed, true);
+
+  // Exceeds 50 MB single file limit
+  const overFile = validateUploadQuota({
+    fileSizeBytes: MAX_FILE_BYTES + 1024,
+    currentProjectBytes: 0,
+    currentUserBytes: 0,
+  });
+  assert.equal(overFile.allowed, false);
+  assert.match(overFile.error || '', /50 MB single-file limit/i);
+
+  // Exceeds 150 MB per-project limit
+  const overProject = validateUploadQuota({
+    fileSizeBytes: 40 * 1024 * 1024,
+    currentProjectBytes: MAX_PROJECT_BYTES - 20 * 1024 * 1024,
+    currentUserBytes: 130 * 1024 * 1024,
+  });
+  assert.equal(overProject.allowed, false);
+  assert.match(overProject.error || '', /150 MB per-project/i);
+
+  // Exceeds 500 MB per-user limit
+  const overUser = validateUploadQuota({
+    fileSizeBytes: 30 * 1024 * 1024,
+    currentProjectBytes: 0,
+    currentUserBytes: MAX_USER_BYTES - 10 * 1024 * 1024,
+  });
+  assert.equal(overUser.allowed, false);
+  assert.match(overUser.error || '', /500 MB total user storage/i);
+});
+

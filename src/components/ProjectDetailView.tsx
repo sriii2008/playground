@@ -21,9 +21,22 @@ import {
   ProjectItem,
   ProjectStatus,
 } from '../types';
-import { formatFileSize, normalizeExternalUrl } from '../utils/playgroundLogic';
+import {
+  calculateProjectStorageBytes,
+  formatFileSize,
+  MAX_FILE_BYTES,
+  MAX_PROJECT_BYTES,
+  normalizeExternalUrl,
+  validateUploadQuota,
+} from '../utils/playgroundLogic';
+import {
+  deleteWorkspaceFile,
+  uploadWorkspaceFile,
+} from '../utils/storageClient';
 
 interface ProjectDetailViewProps {
+  username: string;
+  totalUserStorageBytes: number;
   project: ProjectItem;
   onUpdateProject: (updated: ProjectItem, logMessage?: string) => void;
   onDeleteProject: (projectId: string) => void;
@@ -39,6 +52,8 @@ const HACKATHON_STAGES: HackathonStage[] = [
 ];
 
 export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
+  username,
+  totalUserStorageBytes,
   project,
   onUpdateProject,
   onDeleteProject,
@@ -49,6 +64,7 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
   const [hackStage, setHackStage] = useState<HackathonStage>('Prototype Ready');
   const [hackNote, setHackNote] = useState('');
   const [uploadError, setUploadError] = useState('');
+  const [uploadingFile, setUploadingFile] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const patch = (fields: Partial<ProjectItem>, logMsg?: string) => {
@@ -150,44 +166,69 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
     });
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const projectUsedBytes = calculateProjectStorageBytes(project);
+  const projectUsagePct = Math.min(
+    100,
+    Math.round((projectUsedBytes / MAX_PROJECT_BYTES) * 100)
+  );
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setUploadError('');
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
-    const maxBytes = 50 * 1024 * 1024; // 50 MB
-    if (file.size > maxBytes) {
-      setUploadError('File exceeds the 50 MB maximum limit.');
-      e.target.value = '';
+    const quotaCheck = validateUploadQuota({
+      fileSizeBytes: file.size,
+      currentProjectBytes: projectUsedBytes,
+      currentUserBytes: totalUserStorageBytes,
+    });
+
+    if (!quotaCheck.allowed) {
+      setUploadError(quotaCheck.error || `File exceeds the ${formatFileSize(MAX_FILE_BYTES)} limit.`);
       return;
     }
 
-    const storeAttachment = (dataUrl?: string) => {
+    setUploadingFile(true);
+    try {
+      const uploaded = await uploadWorkspaceFile({
+        username,
+        file,
+        projectId: project.id,
+      });
+
       const att: ProjectAttachment = {
         id: `att-${Date.now()}`,
-        name: file.name,
-        sizeBytes: file.size,
-        mimeType: file.type || 'application/octet-stream',
-        uploadedAt: new Date().toISOString().slice(0, 10),
-        dataUrl,
+        name: uploaded.fileName,
+        sizeBytes: uploaded.sizeBytes,
+        mimeType: uploaded.mimeType,
+        uploadedAt: uploaded.uploadedAt,
+        storageId: uploaded.storageId,
+        fileUrl: uploaded.fileUrl,
       };
       patch(
         { attachments: [...project.attachments, att] },
-        `Uploaded ${file.name} (${formatFileSize(file.size)}) to ${project.name}`
+        `Uploaded ${uploaded.fileName} (${formatFileSize(uploaded.sizeBytes)}) to ${project.name}`
       );
-    };
-
-    // Keep base64 payload in-browser if <= 4 MB; store full metadata for larger up to 50 MB
-    if (file.size <= 4 * 1024 * 1024) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        storeAttachment(typeof reader.result === 'string' ? reader.result : undefined);
-      };
-      reader.readAsDataURL(file);
-    } else {
-      storeAttachment(undefined);
+    } catch (err) {
+      setUploadError(
+        err instanceof Error ? err.message : 'Could not upload file to workspace storage.'
+      );
+    } finally {
+      setUploadingFile(false);
     }
-    e.target.value = '';
+  };
+
+  const handleRemoveAttachment = (att: ProjectAttachment) => {
+    if (att.storageId) {
+      deleteWorkspaceFile(username, att.storageId);
+    }
+    patch(
+      {
+        attachments: project.attachments.filter((a) => a.id !== att.id),
+      },
+      `Removed ${att.name} from ${project.name}`
+    );
   };
 
   const sliderBg = `linear-gradient(to right, var(--accent) 0%, var(--accent) ${project.progress}%, var(--accent-soft) ${project.progress}%, var(--accent-soft) 100%)`;
@@ -754,16 +795,33 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
 
           {/* 4. PDF / PPT (max 50 MB) */}
           <section className="bg-white border border-[var(--border-subtle)] rounded-2xl p-6 space-y-4">
-            <div className="flex items-center gap-2 text-[15px] font-semibold text-[var(--text-primary)]">
-              <FileText className="w-4 h-4 text-[var(--accent)]" />
-              <h2>PDF / PPT (max 50 MB)</h2>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[15px] font-semibold text-[var(--text-primary)]">
+                <FileText className="w-4 h-4 text-[var(--accent)]" />
+                <h2>PDF / PPT (max 50 MB)</h2>
+              </div>
+              <span className="text-[11px] text-[var(--text-secondary)] tabular-nums">
+                {formatFileSize(projectUsedBytes)} / 150 MB
+              </span>
             </div>
 
-            <label className="w-full h-12 rounded-xl border border-dashed border-[var(--border-subtle)] hover:border-[var(--accent)] bg-[var(--bg-canvas)] hover:bg-[var(--accent-soft)]/40 flex items-center justify-center gap-2 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer">
+            <div className="w-full h-1.5 rounded-full bg-[var(--accent-soft)] overflow-hidden">
+              <div
+                className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
+                style={{ width: `${projectUsagePct}%` }}
+              />
+            </div>
+
+            <label
+              className={`w-full h-12 rounded-xl border border-dashed border-[var(--border-subtle)] hover:border-[var(--accent)] bg-[var(--bg-canvas)] hover:bg-[var(--accent-soft)]/40 flex items-center justify-center gap-2 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors ${
+                uploadingFile ? 'opacity-60 pointer-events-none' : 'cursor-pointer'
+              }`}
+            >
               <Upload className="w-4 h-4 text-[var(--accent)]" />
-              <span>Upload file</span>
+              <span>{uploadingFile ? 'Uploading to workspace storage...' : 'Upload file'}</span>
               <input
                 type="file"
+                disabled={uploadingFile}
                 accept=".pdf,.ppt,.pptx,application/pdf,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 onChange={handleFileUpload}
                 className="hidden"
@@ -778,47 +836,46 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
 
             {project.attachments.length > 0 && (
               <ul className="space-y-2">
-                {project.attachments.map((att) => (
-                  <li
-                    key={att.id}
-                    className="px-3 py-2 rounded-xl bg-[var(--bg-input)] flex items-center justify-between gap-2 text-xs"
-                  >
-                    <div className="min-w-0">
-                      <p className="font-medium text-[var(--text-primary)] truncate">
-                        {att.name}
-                      </p>
-                      <p className="text-[11px] text-[var(--text-muted)] tabular-nums">
-                        {formatFileSize(att.sizeBytes)} · {att.uploadedAt}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {att.dataUrl && (
-                        <a
-                          href={att.dataUrl}
-                          download={att.name}
-                          aria-label={`Download ${att.name}`}
-                          className="p-1.5 rounded-lg hover:bg-white text-[var(--accent)]"
+                {project.attachments.map((att) => {
+                  const downloadHref = att.fileUrl
+                    ? `${att.fileUrl}?download=1`
+                    : att.dataUrl;
+                  return (
+                    <li
+                      key={att.id}
+                      className="px-3 py-2 rounded-xl bg-[var(--bg-input)] flex items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <p className="font-medium text-[var(--text-primary)] truncate">
+                          {att.name}
+                        </p>
+                        <p className="text-[11px] text-[var(--text-muted)] tabular-nums">
+                          {formatFileSize(att.sizeBytes)} · {att.uploadedAt}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {downloadHref && (
+                          <a
+                            href={downloadHref}
+                            download={att.name}
+                            aria-label={`Download ${att.name}`}
+                            className="p-1.5 rounded-lg hover:bg-white text-[var(--accent)]"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveAttachment(att)}
+                          aria-label={`Remove attachment ${att.name}`}
+                          className="p-1.5 rounded-lg hover:bg-white text-[var(--text-muted)] hover:text-rose-600 cursor-pointer"
                         >
-                          <Download className="w-3.5 h-3.5" />
-                        </a>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          patch({
-                            attachments: project.attachments.filter(
-                              (a) => a.id !== att.id
-                            ),
-                          })
-                        }
-                        aria-label={`Remove attachment ${att.name}`}
-                        className="p-1.5 rounded-lg hover:bg-white text-[var(--text-muted)] hover:text-rose-600 cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </li>
-                ))}
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>
