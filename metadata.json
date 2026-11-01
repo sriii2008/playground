@@ -2,5 +2,7 @@
   "name": "Playground",
   "description": "An IDE-inspired workspace to manage projects, hackathon updates, prototype and documentation links, certificates, reminders, and Excel CSV user history.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

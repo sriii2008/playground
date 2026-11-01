@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDemoWonderWorkspace, createEmptyWorkspace } from './src/data/seedData.ts';
@@ -20,7 +21,22 @@ import type { StoredAccount, UserWorkspaceData } from './src/types.ts';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DATA_DIR = path.join(__dirname, 'data');
+function resolveWritableDataDir(): string {
+  const preferred = process.env.PLAYGROUND_DATA_DIR || path.join(__dirname, 'data');
+  try {
+    fs.mkdirSync(preferred, { recursive: true });
+    const probe = path.join(preferred, `.probe_${process.pid}`);
+    fs.writeFileSync(probe, 'ok', 'utf-8');
+    fs.unlinkSync(probe);
+    return preferred;
+  } catch {
+    const fallback = path.join(os.tmpdir(), 'playground-data');
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  }
+}
+
+const DATA_DIR = resolveWritableDataDir();
 const CSV_DIR = path.join(DATA_DIR, 'csv');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
@@ -80,14 +96,22 @@ function ensureStorageInitialized(): Record<string, StoredAccount> {
 }
 
 function persistAccounts(accounts: Record<string, StoredAccount>): void {
-  fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2), 'utf-8');
+  try {
+    fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Could not persist accounts file:', err);
+  }
 }
 
 function writeUserCsvFile(username: string, workspace: UserWorkspaceData): string {
   const safeName = username.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
   const csvPath = path.join(CSV_DIR, `${safeName}_user_history.csv`);
   const csvBody = '\uFEFF' + generateUserHistoryCsv(workspace);
-  fs.writeFileSync(csvPath, csvBody, 'utf-8');
+  try {
+    fs.writeFileSync(csvPath, csvBody, 'utf-8');
+  } catch (err) {
+    console.warn('Could not write user CSV file:', err);
+  }
   return csvPath;
 }
 
@@ -105,12 +129,20 @@ function loadUploadsIndex(): Record<string, StoredFileMeta> {
 }
 
 function saveUploadsIndex(index: Record<string, StoredFileMeta>): void {
-  fs.writeFileSync(UPLOADS_INDEX_FILE, JSON.stringify(index, null, 2), 'utf-8');
+  try {
+    fs.writeFileSync(UPLOADS_INDEX_FILE, JSON.stringify(index, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Could not persist uploads index:', err);
+  }
 }
 
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+
+  app.get('/healthz', (_req: Request, res: Response) => {
+    res.status(200).json({ ok: true });
+  });
 
   let accounts = ensureStorageInitialized();
   let uploadsIndex = loadUploadsIndex();
@@ -406,7 +438,13 @@ async function startServer() {
     res.sendFile(csvPath);
   });
 
-  const isProd = process.env.NODE_ENV === 'production';
+  const distPath = path.join(__dirname, 'dist');
+  const distIndexPath = path.join(distPath, 'index.html');
+  const isProd =
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.K_SERVICE) ||
+    (process.env.npm_lifecycle_event === 'start' && fs.existsSync(distIndexPath));
+
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -415,16 +453,30 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.use((req: Request, res: Response, next) => {
+      if (req.method !== 'GET' || req.path.startsWith('/api/')) {
+        next();
+        return;
+      }
+      if (fs.existsSync(distIndexPath)) {
+        res.sendFile(distIndexPath);
+      } else {
+        res.status(503).send('Application build missing. Run npm run build first.');
+      }
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Playground server running at http://0.0.0.0:${PORT}`);
+    console.log(
+      `Playground server running at http://0.0.0.0:${PORT} (mode=${
+        isProd ? 'production' : 'development'
+      }, dataDir=${DATA_DIR})`
+    );
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Fatal Playground server startup error:', err);
+  process.exit(1);
+});

@@ -1,9 +1,9 @@
-import {
+import type {
   ProjectItem,
   ProjectStatus,
   ReminderItem,
   UserWorkspaceData,
-} from '../types';
+} from '../types.ts';
 
 export const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug'] as const;
 
