@@ -1,12 +1,15 @@
 import React, { useState } from 'react';
 import {
   Bell,
+  CheckCircle2,
   Code2,
   Download,
+  Eye,
   ExternalLink,
   FileText,
   Layers,
   Link2,
+  Paperclip,
   Plus,
   Trash2,
   TrendingUp,
@@ -23,6 +26,7 @@ import {
 } from '../types';
 import {
   calculateProjectStorageBytes,
+  detectAttachmentBadge,
   formatFileSize,
   MAX_FILE_BYTES,
   MAX_PROJECT_BYTES,
@@ -33,6 +37,10 @@ import {
   deleteWorkspaceFile,
   uploadWorkspaceFile,
 } from '../utils/storageClient';
+import {
+  resolveStoredFileUrl,
+  triggerStoredFileDownload,
+} from '../utils/fileVault';
 
 interface ProjectDetailViewProps {
   username: string;
@@ -63,8 +71,18 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
   const [memberRoleInput, setMemberRoleInput] = useState('');
   const [hackStage, setHackStage] = useState<HackathonStage>('Prototype Ready');
   const [hackNote, setHackNote] = useState('');
+  const [uploadCategory, setUploadCategory] = useState<string>('Auto');
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const [uploadError, setUploadError] = useState('');
+  const [uploadSuccess, setUploadSuccess] = useState('');
   const [uploadingFile, setUploadingFile] = useState(false);
+  const [previewState, setPreviewState] = useState<{
+    att: ProjectAttachment;
+    url: string | null;
+    textPreview?: string;
+    revoke: boolean;
+    loading: boolean;
+  } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const patch = (fields: Partial<ProjectItem>, logMsg?: string) => {
@@ -172,50 +190,158 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
     Math.round((projectUsedBytes / MAX_PROJECT_BYTES) * 100)
   );
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const processProjectFiles = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList);
+    if (files.length === 0) return;
+
     setUploadError('');
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-
-    const quotaCheck = validateUploadQuota({
-      fileSizeBytes: file.size,
-      currentProjectBytes: projectUsedBytes,
-      currentUserBytes: totalUserStorageBytes,
-    });
-
-    if (!quotaCheck.allowed) {
-      setUploadError(quotaCheck.error || `File exceeds the ${formatFileSize(MAX_FILE_BYTES)} limit.`);
-      return;
-    }
-
+    setUploadSuccess('');
     setUploadingFile(true);
-    try {
-      const uploaded = await uploadWorkspaceFile({
-        username,
-        file,
-        projectId: project.id,
-      });
 
-      const att: ProjectAttachment = {
-        id: `att-${Date.now()}`,
-        name: uploaded.fileName,
-        sizeBytes: uploaded.sizeBytes,
-        mimeType: uploaded.mimeType,
-        uploadedAt: uploaded.uploadedAt,
-        storageId: uploaded.storageId,
-        fileUrl: uploaded.fileUrl,
-      };
-      patch(
-        { attachments: [...project.attachments, att] },
-        `Uploaded ${uploaded.fileName} (${formatFileSize(uploaded.sizeBytes)}) to ${project.name}`
-      );
+    let runningProjectBytes = projectUsedBytes;
+    let runningUserBytes = totalUserStorageBytes;
+    const newlyUploaded: ProjectAttachment[] = [];
+
+    try {
+      for (const file of files) {
+        const quotaCheck = validateUploadQuota({
+          fileSizeBytes: file.size,
+          currentProjectBytes: runningProjectBytes,
+          currentUserBytes: runningUserBytes,
+        });
+
+        if (!quotaCheck.allowed) {
+          setUploadError(
+            quotaCheck.error ||
+              `"${file.name}" exceeds the ${formatFileSize(MAX_FILE_BYTES)} limit.`
+          );
+          break;
+        }
+
+        const uploaded = await uploadWorkspaceFile({
+          username,
+          file,
+          projectId: project.id,
+        });
+
+        const badge = detectAttachmentBadge(uploaded.fileName, uploaded.mimeType);
+        const category = uploadCategory === 'Auto' ? badge.defaultCategory : uploadCategory;
+
+        newlyUploaded.push({
+          id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          name: uploaded.fileName,
+          sizeBytes: uploaded.sizeBytes,
+          mimeType: uploaded.mimeType,
+          uploadedAt: uploaded.uploadedAt,
+          category,
+          storageId: uploaded.storageId,
+          fileUrl: uploaded.fileUrl,
+        });
+
+        runningProjectBytes += uploaded.sizeBytes;
+        runningUserBytes += uploaded.sizeBytes;
+      }
+
+      if (newlyUploaded.length > 0) {
+        const namesSummary =
+          newlyUploaded.length === 1
+            ? `${newlyUploaded[0].name} (${formatFileSize(newlyUploaded[0].sizeBytes)})`
+            : `${newlyUploaded.length} files`;
+        patch(
+          { attachments: [...newlyUploaded, ...project.attachments] },
+          `Attached ${namesSummary} to ${project.name}`
+        );
+        setUploadSuccess(
+          newlyUploaded.length === 1
+            ? `Attached ${newlyUploaded[0].name}`
+            : `Attached ${newlyUploaded.length} project files`
+        );
+        setTimeout(() => setUploadSuccess(''), 3000);
+      }
     } catch (err) {
       setUploadError(
-        err instanceof Error ? err.message : 'Could not upload file to workspace storage.'
+        err instanceof Error ? err.message : 'Could not attach file to project.'
       );
     } finally {
       setUploadingFile(false);
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (files.length === 0) return;
+    await processProjectFiles(files);
+  };
+
+  const handleFileDrop = async (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    setDraggingFiles(false);
+    if (uploadingFile) return;
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      await processProjectFiles(e.dataTransfer.files);
+    }
+  };
+
+  const handleOpenPreview = async (att: ProjectAttachment) => {
+    setPreviewState({ att, url: null, revoke: false, loading: true });
+    const resolved = await resolveStoredFileUrl({
+      storageId: att.storageId,
+      fileUrl: att.fileUrl,
+      dataUrl: att.dataUrl,
+      username,
+      fileName: att.name,
+      mimeType: att.mimeType,
+    });
+
+    if (!resolved) {
+      setPreviewState({ att, url: null, revoke: false, loading: false });
+      return;
+    }
+
+    let textPreview: string | undefined;
+    const lowerName = att.name.toLowerCase();
+    const isTextLike =
+      att.mimeType.startsWith('text/') ||
+      /\.(md|txt|csv|json|ts|tsx|js|py|html|css|yml|yaml)$/.test(lowerName);
+
+    if (isTextLike && resolved.blob && resolved.blob.size <= 512 * 1024) {
+      try {
+        textPreview = await resolved.blob.text();
+      } catch {
+        // ignore text decode errors
+      }
+    }
+
+    setPreviewState({
+      att,
+      url: resolved.url,
+      textPreview,
+      revoke: resolved.revoke,
+      loading: false,
+    });
+  };
+
+  const handleClosePreview = () => {
+    if (previewState?.revoke && previewState.url) {
+      URL.revokeObjectURL(previewState.url);
+    }
+    setPreviewState(null);
+  };
+
+  const handleDownloadAttachment = async (att: ProjectAttachment) => {
+    const ok = await triggerStoredFileDownload({
+      storageId: att.storageId,
+      fileUrl: att.fileUrl,
+      dataUrl: att.dataUrl,
+      username,
+      fileName: att.name,
+      mimeType: att.mimeType,
+    });
+    if (!ok) {
+      setUploadError(
+        `Original binary for "${att.name}" is not stored on this device yet. Re-upload the file to attach its binary.`
+      );
     }
   };
 
@@ -793,12 +919,12 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
             />
           </section>
 
-          {/* 4. PDF / PPT (max 50 MB) */}
+          {/* 4. Project documents & related files (max 50 MB per file) */}
           <section className="bg-white border border-[var(--border-subtle)] rounded-2xl p-6 space-y-4">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-[15px] font-semibold text-[var(--text-primary)]">
-                <FileText className="w-4 h-4 text-[var(--accent)]" />
-                <h2>PDF / PPT (max 50 MB)</h2>
+                <Paperclip className="w-4 h-4 text-[var(--accent)]" />
+                <h2>Project documents &amp; files</h2>
               </div>
               <span className="text-[11px] text-[var(--text-secondary)] tabular-nums">
                 {formatFileSize(projectUsedBytes)} / 150 MB
@@ -812,62 +938,127 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
               />
             </div>
 
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="proj-doc-category"
+                className="text-xs text-[var(--text-secondary)]"
+              >
+                Document type
+              </label>
+              <select
+                id="proj-doc-category"
+                value={uploadCategory}
+                onChange={(e) => setUploadCategory(e.target.value)}
+                className="h-8 px-2.5 rounded-lg bg-[var(--bg-input)] text-xs font-medium text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] cursor-pointer"
+              >
+                <option value="Auto">Auto-detect</option>
+                <option value="Pitch Deck">Pitch Deck</option>
+                <option value="Documentation">Documentation</option>
+                <option value="Report / PDF">Report / PDF</option>
+                <option value="Prototype / UI">Prototype / UI</option>
+                <option value="Dataset / Code">Dataset / Code</option>
+                <option value="Related File">Related File</option>
+              </select>
+            </div>
+
             <label
-              className={`w-full h-12 rounded-xl border border-dashed border-[var(--border-subtle)] hover:border-[var(--accent)] bg-[var(--bg-canvas)] hover:bg-[var(--accent-soft)]/40 flex items-center justify-center gap-2 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors ${
-                uploadingFile ? 'opacity-60 pointer-events-none' : 'cursor-pointer'
-              }`}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDraggingFiles(true);
+              }}
+              onDragLeave={() => setDraggingFiles(false)}
+              onDrop={handleFileDrop}
+              className={`w-full py-4 px-3 rounded-xl border border-dashed flex flex-col items-center justify-center gap-1 text-center transition-colors ${
+                draggingFiles
+                  ? 'border-[var(--accent)] bg-[var(--accent-soft)]/60'
+                  : 'border-[var(--border-subtle)] hover:border-[var(--accent)] bg-[var(--bg-canvas)] hover:bg-[var(--accent-soft)]/40'
+              } ${uploadingFile ? 'opacity-60 pointer-events-none' : 'cursor-pointer'}`}
             >
-              <Upload className="w-4 h-4 text-[var(--accent)]" />
-              <span>{uploadingFile ? 'Uploading to workspace storage...' : 'Upload file'}</span>
+              <div className="flex items-center gap-2 text-xs font-semibold text-[var(--text-primary)]">
+                <Upload className="w-4 h-4 text-[var(--accent)]" />
+                <span>
+                  {uploadingFile
+                    ? 'Saving to project workspace...'
+                    : 'Upload documents & related files'}
+                </span>
+              </div>
+              <span className="text-[11px] text-[var(--text-muted)]">
+                PDF, PPT/PPTX, DOC/DOCX, Images, CSV/XLSX, MD, ZIP · max 50 MB each
+              </span>
               <input
                 type="file"
+                multiple
                 disabled={uploadingFile}
-                accept=".pdf,.ppt,.pptx,application/pdf,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 onChange={handleFileUpload}
+                aria-label="Upload project documents and related files"
                 className="hidden"
               />
             </label>
 
             {uploadError && (
-              <p role="alert" className="text-xs text-rose-600">
+              <p role="alert" className="text-xs text-rose-600 font-medium">
                 {uploadError}
+              </p>
+            )}
+
+            {uploadSuccess && !uploadError && (
+              <p className="text-xs text-emerald-700 font-medium inline-flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>{uploadSuccess}</span>
               </p>
             )}
 
             {project.attachments.length > 0 && (
               <ul className="space-y-2">
                 {project.attachments.map((att) => {
-                  const downloadHref = att.fileUrl
-                    ? `${att.fileUrl}?download=1`
-                    : att.dataUrl;
+                  const badge = detectAttachmentBadge(att.name, att.mimeType);
+                  const categoryLabel = att.category || badge.defaultCategory;
                   return (
                     <li
                       key={att.id}
-                      className="px-3 py-2 rounded-xl bg-[var(--bg-input)] flex items-center justify-between gap-2 text-xs"
+                      className="px-3 py-2.5 rounded-xl bg-[var(--bg-input)] flex items-center justify-between gap-2 text-xs"
                     >
-                      <div className="min-w-0">
-                        <p className="font-medium text-[var(--text-primary)] truncate">
-                          {att.name}
+                      <button
+                        type="button"
+                        onClick={() => handleOpenPreview(att)}
+                        className="min-w-0 text-left flex-1 group cursor-pointer"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className="px-1.5 py-0.5 rounded bg-white text-[var(--accent)] font-mono text-[10px] font-bold shrink-0">
+                            {badge.ext}
+                          </span>
+                          <p className="font-medium text-[var(--text-primary)] group-hover:text-[var(--accent)] truncate transition-colors">
+                            {att.name}
+                          </p>
+                        </div>
+                        <p className="text-[11px] text-[var(--text-muted)] tabular-nums mt-0.5 truncate">
+                          {categoryLabel} · {formatFileSize(att.sizeBytes)} · {att.uploadedAt}
                         </p>
-                        <p className="text-[11px] text-[var(--text-muted)] tabular-nums">
-                          {formatFileSize(att.sizeBytes)} · {att.uploadedAt}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {downloadHref && (
-                          <a
-                            href={downloadHref}
-                            download={att.name}
-                            aria-label={`Download ${att.name}`}
-                            className="p-1.5 rounded-lg hover:bg-white text-[var(--accent)]"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                          </a>
-                        )}
+                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenPreview(att)}
+                          aria-label={`Preview ${att.name}`}
+                          title="Preview document"
+                          className="p-1.5 rounded-lg hover:bg-white text-[var(--text-secondary)] hover:text-[var(--accent)] cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadAttachment(att)}
+                          aria-label={`Download ${att.name}`}
+                          title="Download file"
+                          className="p-1.5 rounded-lg hover:bg-white text-[var(--accent)] cursor-pointer"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
                         <button
                           type="button"
                           onClick={() => handleRemoveAttachment(att)}
                           aria-label={`Remove attachment ${att.name}`}
+                          title="Remove file"
                           className="p-1.5 rounded-lg hover:bg-white text-[var(--text-muted)] hover:text-rose-600 cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -881,6 +1072,115 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
           </section>
         </div>
       </div>
+
+      {/* In-App Document & File Preview Modal */}
+      {previewState && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Preview ${previewState.att.name}`}
+          onClick={handleClosePreview}
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-3xl max-h-[86vh] bg-white border border-[var(--border-subtle)] rounded-2xl overflow-hidden shadow-xl flex flex-col"
+          >
+            <div className="px-5 py-3.5 border-b border-[var(--border-subtle)] flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-[var(--text-primary)] truncate">
+                  {previewState.att.name}
+                </h3>
+                <p className="text-[11px] text-[var(--text-secondary)] tabular-nums">
+                  {previewState.att.category ||
+                    detectAttachmentBadge(previewState.att.name, previewState.att.mimeType)
+                      .defaultCategory}{' '}
+                  · {formatFileSize(previewState.att.sizeBytes)} · Uploaded{' '}
+                  {previewState.att.uploadedAt}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {previewState.url && (
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadAttachment(previewState.att)}
+                    className="h-8 px-3 rounded-lg bg-[var(--accent-soft)] text-[var(--accent)] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleClosePreview}
+                  aria-label="Close document preview"
+                  className="p-1.5 rounded-lg hover:bg-black/5 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-5 overflow-y-auto flex-1 bg-[var(--bg-canvas)]">
+              {previewState.loading ? (
+                <div className="h-64 flex items-center justify-center text-xs text-[var(--text-secondary)]">
+                  Loading document preview...
+                </div>
+              ) : !previewState.url ? (
+                <div className="h-64 flex flex-col items-center justify-center text-center px-6 space-y-2">
+                  <FileText className="w-10 h-10 text-[var(--accent)] opacity-80" />
+                  <p className="text-sm font-semibold text-[var(--text-primary)]">
+                    Metadata record ({formatFileSize(previewState.att.sizeBytes)})
+                  </p>
+                  <p className="text-xs text-[var(--text-secondary)] max-w-md">
+                    Re-attach this file from your device if you would like to store its full binary for live preview and download.
+                  </p>
+                </div>
+              ) : previewState.att.mimeType.startsWith('image/') ||
+                /\.(png|jpg|jpeg|webp|gif|svg)$/i.test(previewState.att.name) ? (
+                <div className="flex items-center justify-center">
+                  <img
+                    src={previewState.url}
+                    alt={previewState.att.name}
+                    className="max-h-[65vh] rounded-xl object-contain"
+                  />
+                </div>
+              ) : previewState.att.mimeType === 'application/pdf' ||
+                /\.pdf$/i.test(previewState.att.name) ? (
+                <iframe
+                  src={previewState.url}
+                  title={previewState.att.name}
+                  className="w-full h-[65vh] rounded-xl border border-[var(--border-subtle)] bg-white"
+                />
+              ) : previewState.textPreview !== undefined ? (
+                <pre className="p-4 rounded-xl bg-white border border-[var(--border-subtle)] text-xs font-mono text-[var(--text-primary)] whitespace-pre-wrap overflow-x-auto max-h-[65vh]">
+                  {previewState.textPreview}
+                </pre>
+              ) : (
+                <div className="h-64 flex flex-col items-center justify-center text-center px-6 space-y-3">
+                  <FileText className="w-10 h-10 text-[var(--accent)]" />
+                  <div>
+                    <p className="text-sm font-semibold text-[var(--text-primary)]">
+                      {previewState.att.name}
+                    </p>
+                    <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+                      Ready to download ({formatFileSize(previewState.att.sizeBytes)})
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadAttachment(previewState.att)}
+                    className="h-9 px-4 rounded-xl bg-[var(--accent)] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download {previewState.att.name}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

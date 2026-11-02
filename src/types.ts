@@ -22,6 +22,7 @@ export interface ProjectAttachment {
   sizeBytes: number;
   mimeType: string;
   uploadedAt: string;
+  category?: string;
   storageId?: string;
   fileUrl?: string;
   dataUrl?: string;
@@ -97,6 +98,7 @@ export interface UserProfile {
   resumeLink: string;
   resumeFileName?: string;
   resumeSizeBytes?: number;
+  resumeStorageId?: string;
   resumeFileUrl?: string;
   resumeDataUrl?: string;
   avatarDataUrl?: string;

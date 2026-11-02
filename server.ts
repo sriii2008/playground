@@ -150,14 +150,50 @@ async function startServer() {
   const findAccountKey = (username: string): string | undefined =>
     Object.keys(accounts).find((k) => k.toLowerCase() === username.trim().toLowerCase());
 
-  // Binary file upload endpoint (up to 50 MB per file, 150 MB per project, 500 MB per user)
+  const getOrProvisionAccount = (
+    rawUsername: string,
+    incomingWorkspace?: UserWorkspaceData,
+    rawPassword?: string
+  ): StoredAccount | null => {
+    const clean = rawUsername.trim();
+    if (!clean) return null;
+    const existingKey = findAccountKey(clean);
+    if (existingKey) {
+      if (rawPassword) {
+        accounts[existingKey].passwordHash = hashPassword(rawPassword);
+      }
+      return accounts[existingKey];
+    }
+
+    // Cloud Run cold-start auto-rehydration: create account entry without wiping client data
+    const workspace =
+      incomingWorkspace && incomingWorkspace.profile
+        ? {
+            ...incomingWorkspace,
+            profile: { ...incomingWorkspace.profile, username: clean },
+          }
+        : createEmptyWorkspace(clean, clean, '');
+
+    const key = clean.toLowerCase();
+    accounts[key] = {
+      username: clean,
+      passwordHash: hashPassword(rawPassword || 'wonder123'),
+      createdAt: new Date().toISOString(),
+      workspace,
+    };
+    persistAccounts(accounts);
+    writeUserCsvFile(clean, workspace);
+    return accounts[key];
+  };
+
+  // Binary file upload endpoint (supports single-shot and 16 MB chunked uploads up to 50 MB)
   app.post(
     '/api/uploads/:username',
-    express.raw({ type: 'application/octet-stream', limit: '55mb' }),
+    express.raw({ type: 'application/octet-stream', limit: '30mb' }),
     (req: Request, res: Response) => {
-      const key = findAccountKey(String(req.params.username || ''));
-      if (!key) {
-        res.status(404).json({ error: 'User workspace not found.' });
+      const account = getOrProvisionAccount(String(req.params.username || ''));
+      if (!account) {
+        res.status(400).json({ error: 'Valid username is required for file upload.' });
         return;
       }
 
@@ -165,25 +201,46 @@ async function startServer() {
       const rawName = decodeURIComponent(String(req.header('x-file-name') || 'document.pdf'));
       const mimeType = String(req.header('x-mime-type') || 'application/octet-stream');
       const projectId = String(req.header('x-project-id') || '').trim() || undefined;
+      const requestedStorageId = String(req.header('x-storage-id') || '').trim();
+      const chunkIndex = Number(req.header('x-chunk-index') || '0');
+      const totalChunks = Number(req.header('x-total-chunks') || '1');
+      const declaredTotalBytes = Number(req.header('x-total-file-bytes') || bodyBuf.length);
+      const headerProjectBytes = Number(req.header('x-current-project-bytes'));
+      const headerUserBytes = Number(req.header('x-current-user-bytes'));
 
-      const account = accounts[key];
-      const currentUserBytes = calculateUserStorageBytes(account.workspace);
-      const targetProject = projectId
-        ? account.workspace.projects.find((p) => p.id === projectId)
-        : undefined;
-      const currentProjectBytes = targetProject
-        ? calculateProjectStorageBytes(targetProject)
-        : undefined;
+      const effectiveTotalSize =
+        totalChunks > 1 && Number.isFinite(declaredTotalBytes) && declaredTotalBytes > 0
+          ? declaredTotalBytes
+          : bodyBuf.length;
 
-      const quotaCheck = validateUploadQuota({
-        fileSizeBytes: bodyBuf.length,
-        currentProjectBytes,
-        currentUserBytes,
-      });
+      if (chunkIndex === 0) {
+        const serverUserBytes = calculateUserStorageBytes(account.workspace);
+        const currentUserBytes =
+          Number.isFinite(headerUserBytes) && headerUserBytes >= 0
+            ? Math.max(serverUserBytes, headerUserBytes)
+            : serverUserBytes;
 
-      if (!quotaCheck.allowed) {
-        res.status(413).json({ error: quotaCheck.error });
-        return;
+        const targetProject = projectId
+          ? account.workspace.projects.find((p) => p.id === projectId)
+          : undefined;
+        const serverProjectBytes = targetProject
+          ? calculateProjectStorageBytes(targetProject)
+          : undefined;
+        const currentProjectBytes =
+          Number.isFinite(headerProjectBytes) && headerProjectBytes >= 0
+            ? Math.max(serverProjectBytes ?? 0, headerProjectBytes)
+            : serverProjectBytes;
+
+        const quotaCheck = validateUploadQuota({
+          fileSizeBytes: effectiveTotalSize,
+          currentProjectBytes,
+          currentUserBytes,
+        });
+
+        if (!quotaCheck.allowed) {
+          res.status(413).json({ error: quotaCheck.error });
+          return;
+        }
       }
 
       const safeUser = account.username.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
@@ -192,31 +249,54 @@ async function startServer() {
         fs.mkdirSync(userUploadDir, { recursive: true });
       }
 
-      const storageId = `file_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const storageId =
+        requestedStorageId && /^[a-zA-Z0-9_.-]+$/.test(requestedStorageId)
+          ? requestedStorageId
+          : `file_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       const safeFile = rawName.replace(/[^a-zA-Z0-9_.-]/g, '_');
       const diskFileName = `${storageId}_${safeFile}`;
       const fullDiskPath = path.join(userUploadDir, diskFileName);
-      fs.writeFileSync(fullDiskPath, bodyBuf);
 
-      const meta: StoredFileMeta = {
-        storageId,
-        username: account.username,
-        projectId,
-        fileName: rawName,
-        mimeType,
-        sizeBytes: bodyBuf.length,
-        relativeDiskPath: path.join(safeUser, diskFileName),
-        uploadedAt: new Date().toISOString().slice(0, 10),
-      };
-      uploadsIndex[storageId] = meta;
-      saveUploadsIndex(uploadsIndex);
+      if (chunkIndex === 0) {
+        fs.writeFileSync(fullDiskPath, bodyBuf);
+      } else {
+        fs.appendFileSync(fullDiskPath, bodyBuf);
+      }
+
+      const currentSizeOnDisk = fs.statSync(fullDiskPath).size;
+      if (currentSizeOnDisk > MAX_FILE_BYTES) {
+        try {
+          fs.unlinkSync(fullDiskPath);
+        } catch {
+          // ignore
+        }
+        res.status(413).json({ error: 'File exceeds the 50 MB single-file limit.' });
+        return;
+      }
+
+      const isFinalChunk = chunkIndex >= totalChunks - 1;
+      if (isFinalChunk) {
+        const meta: StoredFileMeta = {
+          storageId,
+          username: account.username,
+          projectId,
+          fileName: rawName,
+          mimeType,
+          sizeBytes: currentSizeOnDisk,
+          relativeDiskPath: path.join(safeUser, diskFileName),
+          uploadedAt: new Date().toISOString().slice(0, 10),
+        };
+        uploadsIndex[storageId] = meta;
+        saveUploadsIndex(uploadsIndex);
+      }
 
       res.status(201).json({
         storageId,
         fileName: rawName,
         mimeType,
-        sizeBytes: bodyBuf.length,
-        uploadedAt: meta.uploadedAt,
+        sizeBytes: currentSizeOnDisk,
+        complete: isFinalChunk,
+        uploadedAt: new Date().toISOString().slice(0, 10),
         fileUrl: `/api/files/${encodeURIComponent(account.username)}/${encodeURIComponent(
           storageId
         )}`,
@@ -227,12 +307,11 @@ async function startServer() {
   app.use(express.json({ limit: '60mb' }));
 
   app.get('/api/storage/status/:username', (req: Request, res: Response) => {
-    const key = findAccountKey(String(req.params.username || ''));
-    if (!key) {
-      res.status(404).json({ error: 'User workspace not found.' });
+    const account = getOrProvisionAccount(String(req.params.username || ''));
+    if (!account) {
+      res.status(400).json({ error: 'Username is required.' });
       return;
     }
-    const account = accounts[key];
     const userUsedBytes = calculateUserStorageBytes(account.workspace);
     const projectBytesById: Record<string, number> = {};
     for (const p of account.workspace.projects) {
@@ -402,33 +481,42 @@ async function startServer() {
   });
 
   app.put('/api/workspace/:username', (req: Request, res: Response) => {
-    const key = findAccountKey(String(req.params.username || ''));
-    if (!key) {
-      res.status(404).json({ error: 'User workspace not found.' });
-      return;
-    }
     const incomingWorkspace = req.body?.workspace as UserWorkspaceData | undefined;
+    const rawPassword =
+      typeof req.body?.password === 'string' && req.body.password
+        ? req.body.password
+        : undefined;
+
     if (!incomingWorkspace || !incomingWorkspace.profile) {
       res.status(400).json({ error: 'Invalid workspace payload.' });
       return;
     }
 
+    const account = getOrProvisionAccount(
+      String(req.params.username || ''),
+      incomingWorkspace,
+      rawPassword
+    );
+    if (!account) {
+      res.status(400).json({ error: 'Valid username is required.' });
+      return;
+    }
+
     // Preserve immutable unique username
-    incomingWorkspace.profile.username = accounts[key].username;
-    accounts[key].workspace = incomingWorkspace;
+    incomingWorkspace.profile.username = account.username;
+    account.workspace = incomingWorkspace;
     persistAccounts(accounts);
-    writeUserCsvFile(accounts[key].username, incomingWorkspace);
+    writeUserCsvFile(account.username, incomingWorkspace);
 
     res.json({ ok: true });
   });
 
   app.get('/api/export/:username.csv', (req: Request, res: Response) => {
-    const key = findAccountKey(String(req.params.username || ''));
-    if (!key) {
+    const account = getOrProvisionAccount(String(req.params.username || ''));
+    if (!account) {
       res.status(404).send('User not found');
       return;
     }
-    const account = accounts[key];
     const csvPath = writeUserCsvFile(account.username, account.workspace);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
@@ -440,29 +528,45 @@ async function startServer() {
 
   const distPath = path.join(__dirname, 'dist');
   const distIndexPath = path.join(distPath, 'index.html');
-  const isProd =
-    process.env.NODE_ENV === 'production' ||
-    Boolean(process.env.K_SERVICE) ||
-    (process.env.npm_lifecycle_event === 'start' && fs.existsSync(distIndexPath));
+  const isDevLifecycle =
+    process.env.NODE_ENV === 'development' ||
+    process.env.npm_lifecycle_event === 'dev';
+  const useProdStatic =
+    !isDevLifecycle &&
+    fs.existsSync(distIndexPath) &&
+    (process.env.NODE_ENV === 'production' ||
+      process.env.npm_lifecycle_event === 'start' ||
+      Boolean(process.env.K_SERVICE));
 
-  if (!isProd) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
+  if (useProdStatic) {
     app.use(express.static(distPath));
     app.use((req: Request, res: Response, next) => {
       if (req.method !== 'GET' || req.path.startsWith('/api/')) {
         next();
         return;
       }
-      if (fs.existsSync(distIndexPath)) {
-        res.sendFile(distIndexPath);
-      } else {
-        res.status(503).send('Application build missing. Run npm run build first.');
+      res.sendFile(distIndexPath);
+    });
+  } else {
+    // Bind port 3000 immediately while Vite initializes in background so Nginx never sees 502/503
+    const disableHmr = process.env.DISABLE_HMR === 'true';
+    const viteMiddlewarePromise = import('vite').then(({ createServer: createViteServer }) =>
+      createViteServer({
+        server: {
+          middlewareMode: true,
+          hmr: disableHmr ? false : true,
+          watch: disableHmr ? null : {},
+        },
+        appType: 'spa',
+      })
+    );
+
+    app.use(async (req: Request, res: Response, next) => {
+      try {
+        const vite = await viteMiddlewarePromise;
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
       }
     });
   }
@@ -470,7 +574,7 @@ async function startServer() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(
       `Playground server running at http://0.0.0.0:${PORT} (mode=${
-        isProd ? 'production' : 'development'
+        useProdStatic ? 'production' : 'development'
       }, dataDir=${DATA_DIR})`
     );
   });

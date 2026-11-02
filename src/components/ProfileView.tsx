@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { Camera, Check, ExternalLink, Upload, X } from 'lucide-react';
+import { Camera, Check, Download, ExternalLink, Upload, X } from 'lucide-react';
 import { UserProfile } from '../types';
 import { calculateAgeFromDob, normalizeExternalUrl } from '../utils/playgroundLogic';
+import { uploadWorkspaceFile } from '../utils/storageClient';
+import { triggerStoredFileDownload } from '../utils/fileVault';
 
 interface ProfileViewProps {
   profile: UserProfile;
@@ -13,6 +15,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   onUpdateProfile,
 }) => {
   const [savedNotice, setSavedNotice] = useState(false);
+  const [resumeUploadError, setResumeUploadError] = useState('');
 
   const patch = (fields: Partial<UserProfile>, logMsg?: string) => {
     const next = { ...profile, ...fields };
@@ -42,24 +45,33 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     e.target.value = '';
   };
 
-  const handleResumeUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleResumeUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        patch(
-          {
-            resumeFileName: file.name,
-            resumeDataUrl: reader.result,
-            resumeLink: profile.resumeLink || file.name,
-          },
-          `Uploaded resume ${file.name}`
-        );
-      }
-    };
-    reader.readAsDataURL(file);
     e.target.value = '';
+    if (!file) return;
+    setResumeUploadError('');
+
+    try {
+      const uploaded = await uploadWorkspaceFile({
+        username: profile.username || 'wonder',
+        file,
+      });
+      patch(
+        {
+          resumeFileName: uploaded.fileName,
+          resumeSizeBytes: uploaded.sizeBytes,
+          resumeStorageId: uploaded.storageId,
+          resumeFileUrl: uploaded.fileUrl,
+          resumeDataUrl: undefined,
+          resumeLink: profile.resumeLink || uploaded.fileName,
+        },
+        `Uploaded resume ${uploaded.fileName}`
+      );
+    } catch (err) {
+      setResumeUploadError(
+        err instanceof Error ? err.message : 'Could not attach resume file.'
+      );
+    }
   };
 
   const initial = (profile.fullName || profile.username || 'W')
@@ -323,14 +335,33 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               <div className="flex items-center gap-2">
                 <label className="h-10 px-3.5 rounded-xl bg-[var(--bg-input)] hover:bg-[var(--accent-soft)] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center gap-1.5 cursor-pointer shrink-0">
                   <Upload className="w-3.5 h-3.5 text-[var(--accent)]" />
-                  <span>{profile.resumeFileName ? 'Replace PDF' : 'Attach PDF'}</span>
+                  <span>{profile.resumeFileName ? 'Replace Resume' : 'Attach Resume'}</span>
                   <input
                     type="file"
-                    accept=".pdf,application/pdf"
+                    accept=".pdf,.doc,.docx,application/pdf"
                     onChange={handleResumeUpload}
                     className="hidden"
                   />
                 </label>
+                {(profile.resumeStorageId || profile.resumeFileUrl || profile.resumeDataUrl) && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      triggerStoredFileDownload({
+                        storageId: profile.resumeStorageId,
+                        fileUrl: profile.resumeFileUrl,
+                        dataUrl: profile.resumeDataUrl,
+                        username: profile.username,
+                        fileName: profile.resumeFileName || 'Resume.pdf',
+                      })
+                    }
+                    aria-label="Download attached resume"
+                    title="Download attached resume"
+                    className="h-10 w-10 rounded-xl bg-[var(--bg-input)] hover:bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center shrink-0 cursor-pointer"
+                  >
+                    <Download className="w-4 h-4" />
+                  </button>
+                )}
                 {profile.resumeLink && /^https?:\/\//i.test(profile.resumeLink) && (
                   <a
                     href={profile.resumeLink}
@@ -344,6 +375,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 )}
               </div>
             </div>
+            {resumeUploadError && (
+              <p role="alert" className="text-xs text-rose-600 mt-1.5">
+                {resumeUploadError}
+              </p>
+            )}
           </div>
         </section>
       </div>

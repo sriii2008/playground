@@ -499,6 +499,7 @@ export default function App() {
 
       {activeTabId === 'certificates/' && (
         <CertificatesView
+          username={workspace.profile.username || activeUsername}
           certificates={workspace.certificates}
           activePreviewCert={activePreviewCert}
           onSetActivePreviewCert={setActivePreviewCert}

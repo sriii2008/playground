@@ -495,3 +495,132 @@ export function validateUploadQuota(params: {
   };
 }
 
+export function detectAttachmentBadge(
+  fileName: string,
+  mimeType = ''
+): { ext: string; defaultCategory: string } {
+  const rawExt = fileName.includes('.')
+    ? fileName.split('.').pop()?.trim().toUpperCase() || 'FILE'
+    : 'FILE';
+  const ext = rawExt.slice(0, 6);
+  const lower = fileName.toLowerCase();
+  const mime = mimeType.toLowerCase();
+
+  if (ext === 'PPT' || ext === 'PPTX' || ext === 'KEY' || lower.includes('pitch') || lower.includes('deck') || lower.includes('slide')) {
+    return { ext, defaultCategory: 'Pitch Deck' };
+  }
+  if (ext === 'DOC' || ext === 'DOCX' || ext === 'MD' || ext === 'TXT' || ext === 'RTF') {
+    return { ext, defaultCategory: 'Documentation' };
+  }
+  if (mime.startsWith('image/') || ['PNG', 'JPG', 'JPEG', 'WEBP', 'SVG', 'GIF'].includes(ext)) {
+    return { ext, defaultCategory: 'Prototype / UI' };
+  }
+  if (['CSV', 'XLS', 'XLSX', 'JSON', 'ZIP', 'TAR', 'GZ'].includes(ext)) {
+    return { ext, defaultCategory: 'Dataset / Code' };
+  }
+  if (ext === 'PDF') {
+    return { ext: 'PDF', defaultCategory: 'Report / PDF' };
+  }
+  return { ext, defaultCategory: 'Related File' };
+}
+
+export function mergeWorkspacesSafely(
+  localWs: UserWorkspaceData,
+  serverWs: UserWorkspaceData
+): UserWorkspaceData {
+  // Merge projects by ID, never dropping projects from either side
+  const serverProjMap = new Map<string, ProjectItem>();
+  for (const sp of serverWs.projects || []) {
+    serverProjMap.set(sp.id, sp);
+  }
+
+  const mergedProjects: ProjectItem[] = [];
+  const seenProjectIds = new Set<string>();
+
+  for (const lp of localWs.projects || []) {
+    seenProjectIds.add(lp.id);
+    const sp = serverProjMap.get(lp.id);
+    if (!sp) {
+      mergedProjects.push(lp);
+      continue;
+    }
+    const localTime = Date.parse(lp.updatedAt || '') || 0;
+    const serverTime = Date.parse(sp.updatedAt || '') || 0;
+
+    // Merge attachments within the project so no uploaded file is ever lost
+    const attMap = new Map<string, ProjectItem['attachments'][number]>();
+    for (const a of sp.attachments || []) attMap.set(a.id, a);
+    for (const a of lp.attachments || []) {
+      const existing = attMap.get(a.id);
+      attMap.set(a.id, existing ? { ...existing, ...a } : a);
+    }
+    const mergedAttachments = Array.from(attMap.values());
+
+    if (localTime >= serverTime) {
+      mergedProjects.push({ ...sp, ...lp, attachments: mergedAttachments });
+    } else {
+      mergedProjects.push({ ...lp, ...sp, attachments: mergedAttachments });
+    }
+  }
+
+  for (const sp of serverWs.projects || []) {
+    if (!seenProjectIds.has(sp.id)) {
+      mergedProjects.push(sp);
+    }
+  }
+
+  // Merge certificates by ID
+  const certMap = new Map<string, UserWorkspaceData['certificates'][number]>();
+  for (const sc of serverWs.certificates || []) certMap.set(sc.id, sc);
+  for (const lc of localWs.certificates || []) {
+    const existing = certMap.get(lc.id);
+    certMap.set(lc.id, existing ? { ...existing, ...lc } : lc);
+  }
+
+  // Merge reminders by ID
+  const remMap = new Map<string, ReminderItem>();
+  for (const sr of serverWs.reminders || []) remMap.set(sr.id, sr);
+  for (const lr of localWs.reminders || []) {
+    remMap.set(lr.id, lr);
+  }
+
+  // Merge history log by ID (up to 100 entries)
+  const logMap = new Map<string, UserWorkspaceData['historyLog'][number]>();
+  for (const lh of localWs.historyLog || []) logMap.set(lh.id, lh);
+  for (const sh of serverWs.historyLog || []) {
+    if (!logMap.has(sh.id)) logMap.set(sh.id, sh);
+  }
+  const mergedLogs = Array.from(logMap.values()).slice(0, 100);
+
+  // Merge profile fields preferring non-empty local values over empty server defaults
+  const lp = localWs.profile;
+  const sp = serverWs.profile;
+  const mergedProfile = {
+    username: lp.username || sp.username,
+    fullName: lp.fullName || sp.fullName,
+    dob: lp.dob || sp.dob,
+    age: lp.age || sp.age,
+    email: lp.email || sp.email,
+    linkedin: lp.linkedin || sp.linkedin,
+    github: lp.github || sp.github,
+    portfolio: lp.portfolio || sp.portfolio,
+    resumeLink: lp.resumeLink || sp.resumeLink,
+    resumeFileName: lp.resumeFileName || sp.resumeFileName,
+    resumeSizeBytes: lp.resumeSizeBytes ?? sp.resumeSizeBytes,
+    resumeStorageId: lp.resumeStorageId || sp.resumeStorageId,
+    resumeFileUrl: lp.resumeFileUrl || sp.resumeFileUrl,
+    resumeDataUrl: lp.resumeDataUrl || sp.resumeDataUrl,
+    avatarDataUrl: lp.avatarDataUrl || sp.avatarDataUrl,
+  };
+
+  return {
+    theme: localWs.theme || serverWs.theme || 'lavender',
+    profile: mergedProfile,
+    projects: mergedProjects,
+    certificates: Array.from(certMap.values()),
+    reminders: Array.from(remMap.values()),
+    historyLog: mergedLogs,
+  };
+}
+
+

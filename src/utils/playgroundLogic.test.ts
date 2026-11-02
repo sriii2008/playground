@@ -15,8 +15,10 @@ import {
   validateUploadQuota,
   calculateProjectStorageBytes,
   calculateUserStorageBytes,
+  detectAttachmentBadge,
+  mergeWorkspacesSafely,
 } from './playgroundLogic';
-import { createDemoWonderWorkspace } from '../data/seedData';
+import { createDemoWonderWorkspace, createEmptyWorkspace } from '../data/seedData';
 
 test('calculateAgeFromDob computes accurate age for ISO and DD-MM-YYYY dates', () => {
   const ref = new Date('2026-11-01T00:00:00Z');
@@ -137,4 +139,50 @@ test('storage quota helpers enforce 50MB file, 150MB project, and 500MB user lim
   assert.equal(overUser.allowed, false);
   assert.match(overUser.error || '', /500 MB total user storage/i);
 });
+
+test('mergeWorkspacesSafely preserves all existing local projects when server cold-starts empty', () => {
+  const localWs = createDemoWonderWorkspace();
+  localWs.profile.username = 'srinidhi';
+  localWs.profile.fullName = 'Srinidhi';
+  // Simulate 5 user projects on device
+  localWs.projects.push({
+    ...localWs.projects[0],
+    id: 'proj-srinidhi-5',
+    slug: 'ai-space-proto',
+    name: 'AI Space Prototype',
+    prototypeLink: 'https://a18nc7f0b9z1-d.space-z',
+    techStack: ['Z ai', 'Dribble'],
+    attachments: [],
+    updatedAt: '2026-11-02T04:20:00Z',
+  });
+  assert.equal(localWs.projects.length, 5);
+
+  const emptyServerWs = createEmptyWorkspace('srinidhi', 'srinidhi', '');
+  assert.equal(emptyServerWs.projects.length, 0);
+
+  const merged = mergeWorkspacesSafely(localWs, emptyServerWs);
+  assert.equal(merged.projects.length, 5);
+  assert.equal(merged.profile.fullName, 'Srinidhi');
+  assert.equal(merged.projects[4].prototypeLink, 'https://a18nc7f0b9z1-d.space-z');
+});
+
+test('detectAttachmentBadge categorizes PDF, PPTX, DOCX, images, and archives cleanly', () => {
+  assert.deepEqual(detectAttachmentBadge('Hackathon_Pitch.pptx'), {
+    ext: 'PPTX',
+    defaultCategory: 'Pitch Deck',
+  });
+  assert.deepEqual(detectAttachmentBadge('Architecture_Spec.docx'), {
+    ext: 'DOCX',
+    defaultCategory: 'Documentation',
+  });
+  assert.deepEqual(detectAttachmentBadge('Screen_Mockup.png', 'image/png'), {
+    ext: 'PNG',
+    defaultCategory: 'Prototype / UI',
+  });
+  assert.deepEqual(detectAttachmentBadge('Final_Report.pdf', 'application/pdf'), {
+    ext: 'PDF',
+    defaultCategory: 'Report / PDF',
+  });
+});
+
 

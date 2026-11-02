@@ -8,8 +8,11 @@ import {
   X,
 } from 'lucide-react';
 import { CertificateFormat, CertificateItem } from '../types';
+import { deleteWorkspaceFile, uploadWorkspaceFile } from '../utils/storageClient';
+import { triggerStoredFileDownload } from '../utils/fileVault';
 
 interface CertificatesViewProps {
+  username: string;
   certificates: CertificateItem[];
   activePreviewCert: CertificateItem | null;
   onSetActivePreviewCert: (cert: CertificateItem | null) => void;
@@ -25,6 +28,7 @@ const FORMAT_BADGE_STYLES: Record<CertificateFormat, string> = {
 };
 
 export const CertificatesView: React.FC<CertificatesViewProps> = ({
+  username,
   certificates,
   activePreviewCert,
   onSetActivePreviewCert,
@@ -33,10 +37,25 @@ export const CertificatesView: React.FC<CertificatesViewProps> = ({
   onDeleteCertificate,
 }) => {
   const [dragging, setDragging] = useState(false);
+  const [uploadError, setUploadError] = useState('');
 
-  const processFiles = (files: FileList | null) => {
+  const readSmallImagePreview = (file: File): Promise<string | undefined> => {
+    if (!file.type.startsWith('image/') || file.size > 350 * 1024) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () =>
+        resolve(typeof reader.result === 'string' ? reader.result : undefined);
+      reader.onerror = () => resolve(undefined);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const processFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    Array.from(files).forEach((file) => {
+    setUploadError('');
+    for (const file of Array.from(files)) {
       const ext = file.name.split('.').pop()?.toUpperCase() || '';
       let format: CertificateFormat = 'PDF';
       if (ext === 'PNG') format = 'PNG';
@@ -48,21 +67,31 @@ export const CertificatesView: React.FC<CertificatesViewProps> = ({
         year: 'numeric',
       });
 
-      const reader = new FileReader();
-      reader.onload = () => {
+      try {
+        const [uploaded, thumbDataUrl] = await Promise.all([
+          uploadWorkspaceFile({ username, file }),
+          readSmallImagePreview(file),
+        ]);
+
         const newCert: CertificateItem = {
           id: `cert-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           title: baseTitle || 'New Certificate',
           issuer: 'Uploaded Credential',
           date: monthYear,
           format,
-          fileName: file.name,
-          dataUrl: typeof reader.result === 'string' ? reader.result : undefined,
+          sizeBytes: uploaded.sizeBytes,
+          storageId: uploaded.storageId,
+          fileUrl: uploaded.fileUrl,
+          fileName: uploaded.fileName,
+          dataUrl: thumbDataUrl,
         };
         onAddCertificate(newCert);
-      };
-      reader.readAsDataURL(file);
-    });
+      } catch (err) {
+        setUploadError(
+          err instanceof Error ? err.message : 'Could not upload certificate.'
+        );
+      }
+    }
   };
 
   const handleDrop = (e: React.DragEvent<HTMLLabelElement>) => {
@@ -108,6 +137,12 @@ export const CertificatesView: React.FC<CertificatesViewProps> = ({
         />
       </label>
 
+      {uploadError && (
+        <p role="alert" className="text-xs text-rose-600 font-medium">
+          {uploadError}
+        </p>
+      )}
+
       {/* 3-Column Certificates Grid */}
       {certificates.length === 0 ? (
         <div className="bg-white border border-[var(--border-subtle)] rounded-2xl p-8 text-center">
@@ -128,9 +163,9 @@ export const CertificatesView: React.FC<CertificatesViewProps> = ({
             >
               {/* Pastel Preview Header */}
               <div className="h-36 bg-[var(--accent-soft)] flex items-center justify-center relative overflow-hidden">
-                {cert.dataUrl && cert.format !== 'PDF' ? (
+                {(cert.dataUrl || cert.fileUrl) && cert.format !== 'PDF' ? (
                   <img
-                    src={cert.dataUrl}
+                    src={cert.dataUrl || cert.fileUrl}
                     alt={cert.title}
                     className="w-full h-full object-cover"
                   />
@@ -261,6 +296,9 @@ export const CertificatesView: React.FC<CertificatesViewProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    if (activePreviewCert.storageId) {
+                      deleteWorkspaceFile(username, activePreviewCert.storageId);
+                    }
                     onDeleteCertificate(activePreviewCert.id);
                     onSetActivePreviewCert(null);
                   }}
@@ -271,15 +309,27 @@ export const CertificatesView: React.FC<CertificatesViewProps> = ({
                 </button>
 
                 <div className="flex items-center gap-2">
-                  {activePreviewCert.dataUrl && (
-                    <a
-                      href={activePreviewCert.dataUrl}
-                      download={activePreviewCert.fileName || activePreviewCert.title}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[var(--accent-soft)] text-[var(--accent)] text-xs font-semibold"
+                  {(activePreviewCert.storageId ||
+                    activePreviewCert.fileUrl ||
+                    activePreviewCert.dataUrl) && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        triggerStoredFileDownload({
+                          storageId: activePreviewCert.storageId,
+                          fileUrl: activePreviewCert.fileUrl,
+                          dataUrl: activePreviewCert.dataUrl,
+                          username,
+                          fileName:
+                            activePreviewCert.fileName ||
+                            `${activePreviewCert.title}.${activePreviewCert.format.toLowerCase()}`,
+                        })
+                      }
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[var(--accent-soft)] text-[var(--accent)] text-xs font-semibold cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
                       <span>Download</span>
-                    </a>
+                    </button>
                   )}
                   <button
                     type="button"
