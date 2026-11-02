@@ -1,0 +1,626 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Hardened Global Primitives (Phase 3)
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUsername(handle) {
+      return handle is string && handle.size() >= 3 && handle.size() <= 32 && handle.matches('^[a-zA-Z0-9_.\\-]+$');
+    }
+
+    function isValidUsernameLower(handle) {
+      return handle is string && handle.size() >= 3 && handle.size() <= 32 && handle.matches('^[a-z0-9_.\\-]+$');
+    }
+
+    function isBoundedStr(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isNonEmptyBoundedStr(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    // Master Gate Helpers (Pillar 1: Relational Sync with /users/{userId})
+    function isMasterUserOwner(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)) &&
+        get(/databases/$(database)/documents/users/$(userId)).data.ownerId == request.auth.uid;
+    }
+
+    function isMasterUserOwnerOrCreating(userId) {
+      return isMasterUserOwner(userId) || (
+        existsAfter(/databases/$(database)/documents/users/$(userId)) &&
+        getAfter(/databases/$(database)/documents/users/$(userId)).data.ownerId == request.auth.uid
+      );
+    }
+
+    // =========================================================================
+    // Validation Blueprints (Pillar 2: Anti-Update-Gap)
+    // =========================================================================
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['ownerId', 'username', 'usernameLower', 'theme', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerId', 'username', 'usernameLower', 'theme', 'createdAt', 'updatedAt']) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        isValidUsername(data.username) &&
+        isValidUsernameLower(data.usernameLower) &&
+        data.username.lower() == data.usernameLower &&
+        data.theme is string &&
+        data.theme.size() <= 16 &&
+        data.theme in ['lavender', 'mint', 'rose', 'sky', 'butter'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUsernameClaim(data) {
+      return data.keys().hasAll(['ownerId', 'username', 'createdAt']) &&
+        data.keys().hasOnly(['ownerId', 'username', 'createdAt']) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        isValidUsername(data.username) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidPrivateProfile(data) {
+      return data.keys().hasAll([
+          'ownerId', 'username', 'fullName', 'dob', 'age', 'email',
+          'linkedin', 'github', 'portfolio', 'resumeLink', 'resumeFileName',
+          'resumeSizeBytes', 'resumeStorageId', 'resumeFileUrl', 'avatarDataUrl',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'username', 'fullName', 'dob', 'age', 'email',
+          'linkedin', 'github', 'portfolio', 'resumeLink', 'resumeFileName',
+          'resumeSizeBytes', 'resumeStorageId', 'resumeFileUrl', 'avatarDataUrl',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        isValidUsername(data.username) &&
+        isBoundedStr(data.fullName, 120) &&
+        isBoundedStr(data.dob, 20) &&
+        isBoundedStr(data.age, 10) &&
+        isBoundedStr(data.email, 254) &&
+        isBoundedStr(data.linkedin, 500) &&
+        isBoundedStr(data.github, 500) &&
+        isBoundedStr(data.portfolio, 500) &&
+        isBoundedStr(data.resumeLink, 500) &&
+        isBoundedStr(data.resumeFileName, 260) &&
+        data.resumeSizeBytes is int &&
+        data.resumeSizeBytes >= 0 &&
+        data.resumeSizeBytes <= 52428800 &&
+        isBoundedStr(data.resumeStorageId, 128) &&
+        isBoundedStr(data.resumeFileUrl, 500) &&
+        isBoundedStr(data.avatarDataUrl, 120000) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTechStackList(arr) {
+      return arr is list && arr.size() <= 30 && (
+        arr.size() == 0 || (arr[0] is string && arr[0].size() <= 80)
+      );
+    }
+
+    function isValidTeamMembersList(arr) {
+      return arr is list && arr.size() <= 25 && (
+        arr.size() == 0 || (
+          arr[0] is map &&
+          arr[0].keys().hasAll(['id', 'name', 'role', 'email']) &&
+          arr[0].keys().hasOnly(['id', 'name', 'role', 'email']) &&
+          isBoundedStr(arr[0].id, 128) &&
+          isBoundedStr(arr[0].name, 120) &&
+          isBoundedStr(arr[0].role, 80) &&
+          isBoundedStr(arr[0].email, 254)
+        )
+      );
+    }
+
+    function isValidAttachmentsList(arr) {
+      return arr is list && arr.size() <= 50 && (
+        arr.size() == 0 || (
+          arr[0] is map &&
+          arr[0].keys().hasAll(['id', 'name', 'sizeBytes', 'mimeType', 'uploadedAt', 'category', 'storageId', 'fileUrl']) &&
+          arr[0].keys().hasOnly(['id', 'name', 'sizeBytes', 'mimeType', 'uploadedAt', 'category', 'storageId', 'fileUrl']) &&
+          isBoundedStr(arr[0].id, 128) &&
+          isNonEmptyBoundedStr(arr[0].name, 260) &&
+          arr[0].sizeBytes is int &&
+          arr[0].sizeBytes >= 0 &&
+          arr[0].sizeBytes <= 52428800 &&
+          isBoundedStr(arr[0].mimeType, 120) &&
+          isBoundedStr(arr[0].uploadedAt, 40) &&
+          isBoundedStr(arr[0].category, 60) &&
+          isBoundedStr(arr[0].storageId, 128) &&
+          isBoundedStr(arr[0].fileUrl, 500)
+        )
+      );
+    }
+
+    function isValidHackathonUpdatesList(arr) {
+      return arr is list && arr.size() <= 50 && (
+        arr.size() == 0 || (
+          arr[0] is map &&
+          arr[0].keys().hasAll(['id', 'hackathonName', 'stage', 'note', 'date']) &&
+          arr[0].keys().hasOnly(['id', 'hackathonName', 'stage', 'note', 'date']) &&
+          isBoundedStr(arr[0].id, 128) &&
+          isBoundedStr(arr[0].hackathonName, 160) &&
+          isBoundedStr(arr[0].stage, 32) &&
+          isBoundedStr(arr[0].note, 1000) &&
+          isBoundedStr(arr[0].date, 40)
+        )
+      );
+    }
+
+    function isValidProjectDoc(data) {
+      return data.keys().hasAll([
+          'ownerId', 'id', 'slug', 'name', 'domain', 'purpose', 'workflowStage',
+          'progress', 'problemStatement', 'solution', 'githubLink', 'prototypeLink',
+          'documentationLink', 'techStack', 'teamName', 'teamMembers', 'attachments',
+          'hackathonName', 'hackathonDeadline', 'hackathonUpdates', 'completedMonth',
+          'clientUpdatedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'id', 'slug', 'name', 'domain', 'purpose', 'workflowStage',
+          'progress', 'problemStatement', 'solution', 'githubLink', 'prototypeLink',
+          'documentationLink', 'techStack', 'teamName', 'teamMembers', 'attachments',
+          'hackathonName', 'hackathonDeadline', 'hackathonUpdates', 'completedMonth',
+          'clientUpdatedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        isValidId(data.id) &&
+        isNonEmptyBoundedStr(data.slug, 140) &&
+        isNonEmptyBoundedStr(data.name, 160) &&
+        isBoundedStr(data.domain, 100) &&
+        isBoundedStr(data.purpose, 2000) &&
+        data.workflowStage is string &&
+        data.workflowStage.size() <= 20 &&
+        data.workflowStage in ['Planned', 'Ongoing', 'Completed', 'Published'] &&
+        data.progress is int &&
+        data.progress >= 0 &&
+        data.progress <= 100 &&
+        isBoundedStr(data.problemStatement, 5000) &&
+        isBoundedStr(data.solution, 5000) &&
+        isBoundedStr(data.githubLink, 500) &&
+        isBoundedStr(data.prototypeLink, 500) &&
+        isBoundedStr(data.documentationLink, 500) &&
+        isValidTechStackList(data.techStack) &&
+        isBoundedStr(data.teamName, 120) &&
+        isValidTeamMembersList(data.teamMembers) &&
+        isValidAttachmentsList(data.attachments) &&
+        isBoundedStr(data.hackathonName, 160) &&
+        isBoundedStr(data.hackathonDeadline, 32) &&
+        isValidHackathonUpdatesList(data.hackathonUpdates) &&
+        data.completedMonth is int &&
+        data.completedMonth >= -1 &&
+        data.completedMonth <= 11 &&
+        isBoundedStr(data.clientUpdatedAt, 40) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCertificateDoc(data) {
+      return data.keys().hasAll([
+          'ownerId', 'id', 'title', 'issuer', 'date', 'format',
+          'sizeBytes', 'storageId', 'fileUrl', 'fileName', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'id', 'title', 'issuer', 'date', 'format',
+          'sizeBytes', 'storageId', 'fileUrl', 'fileName', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        isValidId(data.id) &&
+        isNonEmptyBoundedStr(data.title, 200) &&
+        isBoundedStr(data.issuer, 160) &&
+        isBoundedStr(data.date, 32) &&
+        data.format is string &&
+        data.format.size() <= 8 &&
+        data.format in ['PDF', 'PNG', 'JPG'] &&
+        data.sizeBytes is int &&
+        data.sizeBytes >= 0 &&
+        data.sizeBytes <= 52428800 &&
+        isBoundedStr(data.storageId, 128) &&
+        isBoundedStr(data.fileUrl, 500) &&
+        isBoundedStr(data.fileName, 260) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReminderDoc(data) {
+      return data.keys().hasAll([
+          'ownerId', 'id', 'text', 'projectId', 'projectName',
+          'completed', 'clientCreatedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'id', 'text', 'projectId', 'projectName',
+          'completed', 'clientCreatedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        isValidId(data.id) &&
+        isNonEmptyBoundedStr(data.text, 400) &&
+        isBoundedStr(data.projectId, 128) &&
+        isBoundedStr(data.projectName, 160) &&
+        data.completed is bool &&
+        isBoundedStr(data.clientCreatedAt, 40) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidHistoryLogDoc(data) {
+      return data.keys().hasAll(['ownerId', 'id', 'entryTime', 'action', 'category', 'details', 'createdAt']) &&
+        data.keys().hasOnly(['ownerId', 'id', 'entryTime', 'action', 'category', 'details', 'createdAt']) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.ownerId) &&
+        isValidId(data.id) &&
+        isNonEmptyBoundedStr(data.entryTime, 40) &&
+        isNonEmptyBoundedStr(data.action, 120) &&
+        data.category is string &&
+        data.category.size() <= 24 &&
+        data.category in ['Project', 'Hackathon', 'Certificate', 'Reminder', 'Profile', 'Auth'] &&
+        isBoundedStr(data.details, 500) &&
+        data.createdAt is timestamp;
+    }
+
+    // =========================================================================
+    // 1. Global Unique Username Registry (/usernames/{usernameLower})
+    // =========================================================================
+    match /usernames/{usernameLower} {
+      // Single-handle availability lookup by verified user only; enumeration strictly blocked
+      allow get: if isSignedIn() && isVerified() && isValidUsernameLower(usernameLower);
+      allow list: if false;
+
+      // Claiming a username is atomic with /users/{uid} creation and permanently immutable
+      allow create: if isSignedIn() &&
+        isVerified() &&
+        isValidUsernameLower(usernameLower) &&
+        isValidUsernameClaim(incoming()) &&
+        incoming().username.lower() == usernameLower &&
+        incoming().createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.usernameLower == usernameLower &&
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.ownerId == request.auth.uid;
+
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // 2. Master User Account Gate (/users/{userId}) — Zero PII
+    // =========================================================================
+    match /users/{userId} {
+      allow get: if isSignedIn() && isVerified() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+        isVerified() &&
+        isValidId(userId) &&
+        request.auth.uid == userId &&
+        isValidUserAccount(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        existsAfter(/databases/$(database)/documents/usernames/$(incoming().usernameLower)) &&
+        getAfter(/databases/$(database)/documents/usernames/$(incoming().usernameLower)).data.ownerId == request.auth.uid;
+
+      allow update: if isSignedIn() &&
+        isValidUserAccount(incoming()) && (
+          // Action: ChangeTheme
+          (
+            isVerified() &&
+            isValidId(userId) &&
+            request.auth.uid == userId &&
+            existing().ownerId == request.auth.uid &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().username == existing().username &&
+            incoming().usernameLower == existing().usernameLower &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['theme', 'updatedAt'])
+          )
+        );
+
+      allow delete: if false;
+
+      // =======================================================================
+      // 3. Isolated Private PII Vault (/users/{userId}/private/{docId})
+      // =======================================================================
+      match /private/{docId} {
+        allow get: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          docId == 'profile' &&
+          request.auth.uid == userId &&
+          isMasterUserOwner(userId);
+
+        allow list: if false;
+
+        allow create: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          docId == 'profile' &&
+          request.auth.uid == userId &&
+          isValidPrivateProfile(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isMasterUserOwnerOrCreating(userId);
+
+        allow update: if isSignedIn() &&
+          isValidPrivateProfile(incoming()) && (
+            // Action: EditPrivateProfile
+            (
+              isVerified() &&
+              isValidId(userId) &&
+              docId == 'profile' &&
+              request.auth.uid == userId &&
+              existing().ownerId == request.auth.uid &&
+              incoming().ownerId == existing().ownerId &&
+              incoming().username == existing().username &&
+              incoming().createdAt == existing().createdAt &&
+              incoming().updatedAt == request.time &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'fullName', 'dob', 'age', 'email', 'linkedin', 'github',
+                'portfolio', 'resumeLink', 'resumeFileName', 'resumeSizeBytes',
+                'resumeStorageId', 'resumeFileUrl', 'avatarDataUrl', 'updatedAt'
+              ]) &&
+              isMasterUserOwner(userId)
+            )
+          );
+
+        allow delete: if false;
+      }
+
+      // =======================================================================
+      // 4. Projects Subcollection (/users/{userId}/projects/{projectId})
+      // =======================================================================
+      match /projects/{projectId} {
+        allow get: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(projectId) &&
+          request.auth.uid == userId &&
+          existing().ownerId == request.auth.uid &&
+          isMasterUserOwner(userId);
+
+        // Pillar 8: Secure List Query without O(n) get()/exists() or target doc ID check
+        allow list: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          request.auth.uid == userId &&
+          resource.data.ownerId == request.auth.uid;
+
+        allow create: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(projectId) &&
+          request.auth.uid == userId &&
+          isValidProjectDoc(incoming()) &&
+          incoming().id == projectId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isMasterUserOwnerOrCreating(userId);
+
+        allow update: if isSignedIn() &&
+          isValidProjectDoc(incoming()) && (
+            // Action: UpdateProjectDetails
+            (
+              isVerified() &&
+              isValidId(userId) &&
+              isValidId(projectId) &&
+              request.auth.uid == userId &&
+              existing().ownerId == request.auth.uid &&
+              incoming().ownerId == existing().ownerId &&
+              incoming().id == existing().id &&
+              incoming().id == projectId &&
+              incoming().createdAt == existing().createdAt &&
+              incoming().updatedAt == request.time &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'slug', 'name', 'domain', 'purpose', 'workflowStage', 'progress',
+                'problemStatement', 'solution', 'githubLink', 'prototypeLink',
+                'documentationLink', 'techStack', 'teamName', 'teamMembers',
+                'attachments', 'hackathonName', 'hackathonDeadline',
+                'hackathonUpdates', 'completedMonth', 'clientUpdatedAt', 'updatedAt'
+              ]) &&
+              isMasterUserOwner(userId)
+            )
+          );
+
+        allow delete: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(projectId) &&
+          request.auth.uid == userId &&
+          existing().ownerId == request.auth.uid &&
+          isMasterUserOwner(userId);
+      }
+
+      // =======================================================================
+      // 5. Certificates Subcollection (/users/{userId}/certificates/{certId})
+      // =======================================================================
+      match /certificates/{certId} {
+        allow get: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(certId) &&
+          request.auth.uid == userId &&
+          existing().ownerId == request.auth.uid &&
+          isMasterUserOwner(userId);
+
+        allow list: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          request.auth.uid == userId &&
+          resource.data.ownerId == request.auth.uid;
+
+        allow create: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(certId) &&
+          request.auth.uid == userId &&
+          isValidCertificateDoc(incoming()) &&
+          incoming().id == certId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isMasterUserOwnerOrCreating(userId);
+
+        allow update: if isSignedIn() &&
+          isValidCertificateDoc(incoming()) && (
+            // Action: UpdateCertificateDetails
+            (
+              isVerified() &&
+              isValidId(userId) &&
+              isValidId(certId) &&
+              request.auth.uid == userId &&
+              existing().ownerId == request.auth.uid &&
+              incoming().ownerId == existing().ownerId &&
+              incoming().id == existing().id &&
+              incoming().id == certId &&
+              incoming().createdAt == existing().createdAt &&
+              incoming().updatedAt == request.time &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'title', 'issuer', 'date', 'format', 'sizeBytes',
+                'storageId', 'fileUrl', 'fileName', 'updatedAt'
+              ]) &&
+              isMasterUserOwner(userId)
+            )
+          );
+
+        allow delete: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(certId) &&
+          request.auth.uid == userId &&
+          existing().ownerId == request.auth.uid &&
+          isMasterUserOwner(userId);
+      }
+
+      // =======================================================================
+      // 6. Reminders Subcollection (/users/{userId}/reminders/{reminderId})
+      // =======================================================================
+      match /reminders/{reminderId} {
+        allow get: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(reminderId) &&
+          request.auth.uid == userId &&
+          existing().ownerId == request.auth.uid &&
+          isMasterUserOwner(userId);
+
+        allow list: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          request.auth.uid == userId &&
+          resource.data.ownerId == request.auth.uid;
+
+        allow create: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(reminderId) &&
+          request.auth.uid == userId &&
+          isValidReminderDoc(incoming()) &&
+          incoming().id == reminderId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isMasterUserOwnerOrCreating(userId) && (
+            incoming().projectId == '' || (
+              isValidId(incoming().projectId) && (
+                exists(/databases/$(database)/documents/users/$(userId)/projects/$(incoming().projectId)) ||
+                existsAfter(/databases/$(database)/documents/users/$(userId)/projects/$(incoming().projectId))
+              )
+            )
+          );
+
+        allow update: if isSignedIn() &&
+          isValidReminderDoc(incoming()) && (
+            // Action: ToggleOrUpdateReminder
+            (
+              isVerified() &&
+              isValidId(userId) &&
+              isValidId(reminderId) &&
+              request.auth.uid == userId &&
+              existing().ownerId == request.auth.uid &&
+              incoming().ownerId == existing().ownerId &&
+              incoming().id == existing().id &&
+              incoming().id == reminderId &&
+              incoming().createdAt == existing().createdAt &&
+              incoming().clientCreatedAt == existing().clientCreatedAt &&
+              incoming().updatedAt == request.time &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'text', 'projectId', 'projectName', 'completed', 'updatedAt'
+              ]) &&
+              isMasterUserOwner(userId) && (
+                incoming().projectId == '' ||
+                incoming().projectId == existing().projectId || (
+                  isValidId(incoming().projectId) &&
+                  exists(/databases/$(database)/documents/users/$(userId)/projects/$(incoming().projectId))
+                )
+              )
+            )
+          );
+
+        allow delete: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(reminderId) &&
+          request.auth.uid == userId &&
+          existing().ownerId == request.auth.uid &&
+          isMasterUserOwner(userId);
+      }
+
+      // =======================================================================
+      // 7. Immutable Activity History Log (/users/{userId}/history/{logId})
+      // =======================================================================
+      match /history/{logId} {
+        allow get: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(logId) &&
+          request.auth.uid == userId &&
+          existing().ownerId == request.auth.uid &&
+          isMasterUserOwner(userId);
+
+        allow list: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          request.auth.uid == userId &&
+          resource.data.ownerId == request.auth.uid;
+
+        allow create: if isSignedIn() &&
+          isVerified() &&
+          isValidId(userId) &&
+          isValidId(logId) &&
+          request.auth.uid == userId &&
+          isValidHistoryLogDoc(incoming()) &&
+          incoming().id == logId &&
+          incoming().createdAt == request.time &&
+          isMasterUserOwnerOrCreating(userId);
+
+        allow update, delete: if false;
+      }
+    }
+  }
+}

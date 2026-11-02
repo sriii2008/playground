@@ -1,52 +1,26 @@
-import { createDemoWonderWorkspace, createEmptyWorkspace } from '../data/seedData';
+import { createDemoWonderWorkspace } from '../data/seedData';
 import type { UserWorkspaceData } from '../types';
 import {
   calculateProjectStorageBytes,
   calculateUserStorageBytes,
+  findRecoverableLocalWorkspaces,
   generateUserHistoryCsv,
-  mergeWorkspacesSafely,
-  validateAuthCredentials,
   validateUploadQuota,
 } from './playgroundLogic';
 import { deleteBlobFromVault, saveBlobToVault } from './fileVault';
 
-// Preserve exact localStorage keys so existing user workspaces on all devices stay 100% intact
+// Preserve exact localStorage key so all existing phone/browser workspaces (e.g. srinidhi's 5 projects) stay intact for automatic cloud migration!
 const LOCAL_ACCOUNTS_KEY = 'playground_ide_accounts_v1';
 const SESSION_USER_KEY = 'playground_ide_active_user_v1';
 
 interface LocalAccountRecord {
   username: string;
-  password: string;
+  password?: string; // Legacy field — scrubbed immediately on read/write for security
   createdAt: string;
   workspace: UserWorkspaceData;
 }
 
-function getLocalAccounts(): Record<string, LocalAccountRecord> {
-  try {
-    const raw = localStorage.getItem(LOCAL_ACCOUNTS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') return parsed;
-    }
-  } catch {
-    // ignore storage errors
-  }
-
-  const seeded: Record<string, LocalAccountRecord> = {
-    wonder: {
-      username: 'wonder',
-      password: 'wonder123',
-      createdAt: '2026-08-01T09:00:00Z',
-      workspace: createDemoWonderWorkspace(),
-    },
-  };
-  saveLocalAccounts(seeded);
-  return seeded;
-}
-
 function compactWorkspaceForLocalStorage(ws: UserWorkspaceData): UserWorkspaceData {
-  // Keep localStorage nimble by omitting redundant multi-MB base64 dataUrls
-  // when a file is already persisted in IndexedDB / server storage via storageId.
   return {
     ...ws,
     projects: ws.projects.map((p) => ({
@@ -71,16 +45,65 @@ function compactWorkspaceForLocalStorage(ws: UserWorkspaceData): UserWorkspaceDa
   };
 }
 
-function saveLocalAccounts(accounts: Record<string, LocalAccountRecord>): void {
+function scrubPasswordsMap(
+  rawAccounts: Record<string, LocalAccountRecord>
+): { cleaned: Record<string, LocalAccountRecord>; hadPasswords: boolean } {
+  const cleaned: Record<string, LocalAccountRecord> = {};
+  let hadPasswords = false;
+
+  for (const [k, rec] of Object.entries(rawAccounts)) {
+    if (!rec || typeof rec !== 'object' || !rec.workspace) continue;
+    if ('password' in rec && rec.password !== undefined) {
+      hadPasswords = true;
+    }
+    cleaned[k] = {
+      username: rec.username,
+      createdAt: rec.createdAt || new Date().toISOString(),
+      workspace: rec.workspace,
+    };
+  }
+  return { cleaned, hadPasswords };
+}
+
+function getLocalAccounts(): Record<string, LocalAccountRecord> {
   try {
-    localStorage.setItem(LOCAL_ACCOUNTS_KEY, JSON.stringify(accounts));
+    const raw = localStorage.getItem(LOCAL_ACCOUNTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        const { cleaned, hadPasswords } = scrubPasswordsMap(parsed);
+        if (hadPasswords) {
+          saveLocalAccounts(cleaned);
+        }
+        return cleaned;
+      }
+    }
   } catch {
-    // If browser localStorage nears 5MB due to legacy inline dataUrls, compact only oversized dataUrls
+    // ignore storage errors
+  }
+
+  const seeded: Record<string, LocalAccountRecord> = {
+    wonder: {
+      username: 'wonder',
+      createdAt: '2026-08-01T09:00:00Z',
+      workspace: createDemoWonderWorkspace(),
+    },
+  };
+  saveLocalAccounts(seeded);
+  return seeded;
+}
+
+function saveLocalAccounts(accounts: Record<string, LocalAccountRecord>): void {
+  const { cleaned } = scrubPasswordsMap(accounts);
+  try {
+    localStorage.setItem(LOCAL_ACCOUNTS_KEY, JSON.stringify(cleaned));
+  } catch {
     try {
       const compacted: Record<string, LocalAccountRecord> = {};
-      for (const [k, rec] of Object.entries(accounts)) {
+      for (const [k, rec] of Object.entries(cleaned)) {
         compacted[k] = {
-          ...rec,
+          username: rec.username,
+          createdAt: rec.createdAt,
           workspace: compactWorkspaceForLocalStorage(rec.workspace),
         };
       }
@@ -91,17 +114,32 @@ function saveLocalAccounts(accounts: Record<string, LocalAccountRecord>): void {
   }
 }
 
-export function getSavedSessionUsername(): string | null {
+export function isSandboxAutostartRequested(): boolean {
   try {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('login') === '1') return null;
-    if (params.get('autostart') === '1') return 'wonder';
-
-    const stored = localStorage.getItem(SESSION_USER_KEY);
-    if (stored === '__signed_out__') return null;
-    return stored || 'wonder';
+    return params.get('autostart') === '1';
   } catch {
-    return 'wonder';
+    return false;
+  }
+}
+
+export function getLastLocalUsernameHint(): string | null {
+  try {
+    const stored = localStorage.getItem(SESSION_USER_KEY);
+    if (!stored || stored === '__signed_out__' || stored.toLowerCase() === 'wonder') {
+      // Check if there is a single personal workspace stored on this device
+      const local = getLocalAccounts();
+      const nonDemo = Object.values(local).filter(
+        (r) => r.username && r.username.toLowerCase() !== 'wonder'
+      );
+      if (nonDemo.length === 1) {
+        return nonDemo[0].username;
+      }
+      return null;
+    }
+    return stored;
+  } catch {
+    return null;
   }
 }
 
@@ -113,272 +151,112 @@ export function setSavedSessionUsername(username: string | null): void {
   }
 }
 
-async function pushWorkspaceToServer(
-  username: string,
-  workspace: UserWorkspaceData,
-  password?: string
-): Promise<boolean> {
-  try {
-    const res = await fetch(`/api/workspace/${encodeURIComponent(username)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace, password }),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-export async function fetchRegisteredUsers(): Promise<
-  { username: string; fullName: string; avatarDataUrl?: string; projectCount: number }[]
-> {
+/**
+ * Counts personal (non-demo) projects stored in this browser's localStorage so the user
+ * on her phone sees a reassuring local-only backup notice before signing in with Google.
+ * Never queries any server endpoint or exposes any username/password.
+ */
+export function getLocalDeviceBackupSummary(): {
+  projectCount: number;
+  preferredUsername: string | null;
+} {
   const local = getLocalAccounts();
-  const byKey = new Map<
-    string,
-    { username: string; fullName: string; avatarDataUrl?: string; projectCount: number }
-  >();
+  let projectCount = 0;
+  let preferredUsername: string | null = getLastLocalUsernameHint();
 
-  for (const a of Object.values(local)) {
-    byKey.set(a.username.toLowerCase(), {
-      username: a.username,
-      fullName: a.workspace.profile.fullName,
-      avatarDataUrl: a.workspace.profile.avatarDataUrl,
-      projectCount: a.workspace.projects.length,
-    });
-  }
-
-  try {
-    const res = await fetch('/api/accounts');
-    if (res.ok) {
-      const data = await res.json();
-      for (const u of data.users || []) {
-        const key = String(u.username || '').toLowerCase();
-        if (!key) continue;
-        const existing = byKey.get(key);
-        if (!existing) {
-          byKey.set(key, u);
-        } else {
-          byKey.set(key, {
-            username: existing.username || u.username,
-            fullName: existing.fullName || u.fullName,
-            avatarDataUrl: existing.avatarDataUrl || u.avatarDataUrl,
-            projectCount: Math.max(existing.projectCount, u.projectCount || 0),
-          });
-        }
-      }
+  for (const rec of Object.values(local)) {
+    if (!rec?.workspace || rec.username?.toLowerCase() === 'wonder') continue;
+    projectCount += rec.workspace.projects?.length || 0;
+    if (!preferredUsername && rec.username) {
+      preferredUsername = rec.username;
     }
-  } catch {
-    // local accounts already populated
   }
 
-  return Array.from(byKey.values());
+  return { projectCount, preferredUsername };
 }
 
-export async function loadUserWorkspace(username: string): Promise<UserWorkspaceData> {
+export function getLocalMigrationCandidates(params: {
+  authEmail?: string | null;
+  chosenUsername?: string | null;
+}): UserWorkspaceData[] {
   const local = getLocalAccounts();
-  const localKey = Object.keys(local).find(
-    (k) => k.toLowerCase() === username.trim().toLowerCase()
-  );
-  const localRecord = localKey ? local[localKey] : undefined;
-
-  try {
-    const res = await fetch(`/api/workspace/${encodeURIComponent(username)}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.workspace) {
-        const serverWs = data.workspace as UserWorkspaceData;
-        if (localRecord) {
-          // Safe merge guarantees a cold-started or partial server workspace NEVER erases local projects
-          const merged = mergeWorkspacesSafely(localRecord.workspace, serverWs);
-          local[localKey!] = {
-            ...localRecord,
-            workspace: compactWorkspaceForLocalStorage(merged),
-          };
-          saveLocalAccounts(local);
-
-          // If local had projects/items missing on server, sync merged state back to server
-          if (merged.projects.length > (serverWs.projects?.length || 0)) {
-            pushWorkspaceToServer(localRecord.username, merged, localRecord.password);
-          }
-          return merged;
-        }
-
-        const key = username.trim().toLowerCase();
-        local[key] = {
-          username: serverWs.profile.username || username.trim(),
-          password: 'wonder123',
-          createdAt: new Date().toISOString(),
-          workspace: compactWorkspaceForLocalStorage(serverWs),
-        };
-        saveLocalAccounts(local);
-        return serverWs;
-      }
-    } else if (res.status === 404 && localRecord) {
-      // Server cold-started (e.g. Cloud Run scale-from-zero) -> immediately re-hydrate server from local!
-      await pushWorkspaceToServer(
-        localRecord.username,
-        localRecord.workspace,
-        localRecord.password
-      );
-      return localRecord.workspace;
-    }
-  } catch {
-    // Offline fallback to local
-  }
-
-  if (localRecord) {
-    return localRecord.workspace;
-  }
-
-  // Brand-new or custom session without prior record: initialize cleanly and sync
-  if (username.trim().toLowerCase() !== 'wonder') {
-    const fresh = createEmptyWorkspace(username.trim(), username.trim(), '');
-    await pushWorkspaceToServer(username.trim(), fresh);
-    return fresh;
-  }
-  return createDemoWonderWorkspace();
+  return findRecoverableLocalWorkspaces({
+    localAccounts: local,
+    authEmail: params.authEmail,
+    chosenUsername: params.chosenUsername,
+    lastActiveLocalUser: getLastLocalUsernameHint(),
+  });
 }
 
-export async function saveUserWorkspace(
+export function mirrorWorkspaceToLocalCache(
   username: string,
   workspace: UserWorkspaceData
-): Promise<void> {
+): void {
   const local = getLocalAccounts();
   const key =
     Object.keys(local).find((k) => k.toLowerCase() === username.trim().toLowerCase()) ||
     username.trim().toLowerCase();
 
-  const existingPassword = local[key]?.password;
   local[key] = {
     username: workspace.profile.username || username,
-    password: existingPassword || 'wonder123',
     createdAt: local[key]?.createdAt || new Date().toISOString(),
     workspace: compactWorkspaceForLocalStorage(workspace),
   };
   saveLocalAccounts(local);
-
-  await pushWorkspaceToServer(
-    workspace.profile.username || username,
-    workspace,
-    existingPassword
-  );
 }
 
-export async function signUpAccount(params: {
-  username: string;
-  password: string;
-  fullName: string;
-  email: string;
-  avatarDataUrl?: string;
-}): Promise<{ username: string; workspace: UserWorkspaceData }> {
+export function loadSandboxDemoWorkspace(): UserWorkspaceData {
   const local = getLocalAccounts();
-  const localNames = Object.values(local).map((a) => a.username);
-  const preCheck = validateAuthCredentials(
-    'signup',
-    params.username,
-    params.password,
-    localNames
-  );
-  if (!preCheck.valid) {
-    throw new Error(preCheck.error);
-  }
-
-  try {
-    const res = await fetch('/api/auth/signup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Could not create account.');
-    }
-
-    local[data.username.toLowerCase()] = {
-      username: data.username,
-      password: params.password,
-      createdAt: new Date().toISOString(),
-      workspace: data.workspace,
-    };
-    saveLocalAccounts(local);
-    setSavedSessionUsername(data.username);
-    return data;
-  } catch (err) {
-    if (err instanceof Error && !err.message.includes('Failed to fetch')) {
-      throw err;
-    }
-    const clean = params.username.trim();
-    const ws = createEmptyWorkspace(clean, params.fullName, params.email, params.avatarDataUrl);
-    local[clean.toLowerCase()] = {
-      username: clean,
-      password: params.password,
-      createdAt: new Date().toISOString(),
-      workspace: ws,
-    };
-    saveLocalAccounts(local);
-    setSavedSessionUsername(clean);
-    return { username: clean, workspace: ws };
-  }
+  return local.wonder?.workspace || createDemoWonderWorkspace();
 }
 
-export async function signInAccount(
-  username: string,
-  password: string
-): Promise<{ username: string; workspace: UserWorkspaceData }> {
-  const local = getLocalAccounts();
-  const localKey = Object.keys(local).find(
-    (k) => k.toLowerCase() === username.trim().toLowerCase()
-  );
+export function saveSandboxDemoWorkspace(workspace: UserWorkspaceData): void {
+  mirrorWorkspaceToLocalCache('wonder', workspace);
+}
 
-  try {
-    const res = await fetch('/api/auth/signin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    });
-    const data = await res.json();
-    if (res.ok && data.workspace) {
-      const merged = localKey
-        ? mergeWorkspacesSafely(local[localKey].workspace, data.workspace)
-        : (data.workspace as UserWorkspaceData);
-      const saveKey = localKey || data.username.toLowerCase();
-      local[saveKey] = {
-        username: data.username,
-        password,
-        createdAt: local[saveKey]?.createdAt || new Date().toISOString(),
-        workspace: compactWorkspaceForLocalStorage(merged),
-      };
-      saveLocalAccounts(local);
-      setSavedSessionUsername(data.username);
-      if (localKey && merged.projects.length > (data.workspace.projects?.length || 0)) {
-        pushWorkspaceToServer(data.username, merged, password);
+export async function compressAvatarFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read image file.'));
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!dataUrl) {
+        reject(new Error('Empty image data.'));
+        return;
       }
-      return { username: data.username, workspace: merged };
-    }
-
-    // If Cloud Run cold-started and doesn't know this account yet, authenticate against local record and re-hydrate server!
-    if (localKey && local[localKey].password === password) {
-      const record = local[localKey];
-      await pushWorkspaceToServer(record.username, record.workspace, record.password);
-      setSavedSessionUsername(record.username);
-      return { username: record.username, workspace: record.workspace };
-    }
-
-    throw new Error(data.error || 'Sign in failed.');
-  } catch (err) {
-    if (localKey && local[localKey].password === password) {
-      const record = local[localKey];
-      pushWorkspaceToServer(record.username, record.workspace, record.password);
-      setSavedSessionUsername(record.username);
-      return { username: record.username, workspace: record.workspace };
-    }
-    if (err instanceof Error && !err.message.includes('Failed to fetch')) {
-      throw err;
-    }
-    if (!localKey) throw new Error('Account not found. Check your username or sign up.');
-    throw new Error('Incorrect password. Please try again.');
-  }
+      const img = new Image();
+      img.onerror = () => {
+        if (dataUrl.length <= 110_000) {
+          resolve(dataUrl);
+        } else {
+          reject(new Error('Unsupported image format. Please choose a PNG or JPG image.'));
+        }
+      };
+      img.onload = () => {
+        try {
+          const MAX_DIM = 160;
+          const scale = Math.min(1, MAX_DIM / Math.max(img.width || 1, img.height || 1));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(dataUrl.slice(0, 110_000));
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          const compressed = canvas.toDataURL('image/jpeg', 0.82);
+          resolve(compressed);
+        } catch {
+          resolve(dataUrl.slice(0, 110_000));
+        }
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 export function triggerCsvDownload(workspace: UserWorkspaceData): void {
@@ -411,7 +289,6 @@ export async function uploadWorkspaceFile(params: {
   const { username, file, projectId } = params;
   const cleanUser = username.trim() || 'wonder';
 
-  // Read current local workspace to enforce accurate quota & ensure server is synced
   const local = getLocalAccounts();
   const localKey = Object.keys(local).find(
     (k) => k.toLowerCase() === cleanUser.toLowerCase()
@@ -438,20 +315,11 @@ export async function uploadWorkspaceFile(params: {
     throw new Error(clientQuota.error || 'File exceeds workspace storage quota.');
   }
 
-  // Ensure server knows this workspace if Cloud Run cold-started
-  if (localRecord) {
-    await pushWorkspaceToServer(
-      localRecord.username,
-      localRecord.workspace,
-      localRecord.password
-    );
-  }
-
   const clientStorageId = `file_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
   const uploadedAt = new Date().toISOString().slice(0, 10);
   const mimeType = file.type || 'application/octet-stream';
 
-  // 1. Always save binary Blob in browser IndexedDB first so file survives offline & Cloud Run restarts
+  // 1. Persist binary Blob in IndexedDB so file survives offline & container restarts
   await saveBlobToVault({
     storageId: clientStorageId,
     username: cleanUser,
@@ -463,7 +331,7 @@ export async function uploadWorkspaceFile(params: {
     blob: file,
   });
 
-  // 2. Upload binary stream to backend storage (in 16 MB chunks so 50 MB files pass cleanly through 32 MB Cloud Run / Nginx proxies)
+  // 2. Stream in 16 MB chunks to backend binary vault
   const CHUNK_SIZE = 16 * 1024 * 1024;
   const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
@@ -517,7 +385,6 @@ export async function uploadWorkspaceFile(params: {
     if (err instanceof Error && err.message.includes('limit')) {
       throw err;
     }
-    // IndexedDB vault already holds the complete binary safely on temporary network drops
   }
 
   return {

@@ -5,8 +5,8 @@ import {
   Download,
   FileSpreadsheet,
   HardDrive,
-  KeyRound,
   Palette,
+  ShieldCheck,
   Share2,
   Upload,
 } from 'lucide-react';
@@ -46,9 +46,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [tableFilter, setTableFilter] = useState<HistoryFilter>('All');
   const [copiedType, setCopiedType] = useState<'csv' | 'summary' | null>(null);
   const [importFeedback, setImportFeedback] = useState('');
-  const [currentPassword, setCurrentPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [passwordStatus, setPasswordStatus] = useState('');
 
   const csvString = generateUserHistoryCsv(workspace);
   const allCsvLines = csvString.split('\r\n').filter(Boolean);
@@ -171,34 +168,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     };
     reader.readAsText(file);
     e.target.value = '';
-  };
-
-  const handlePasswordChange = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPasswordStatus('');
-    try {
-      const res = await fetch('/api/auth/password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: workspace.profile.username,
-          currentPassword,
-          newPassword,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setPasswordStatus(data.error || 'Could not update password.');
-        return;
-      }
-      setPasswordStatus('Password updated successfully.');
-      setCurrentPassword('');
-      setNewPassword('');
-    } catch {
-      setPasswordStatus('Password updated locally.');
-      setCurrentPassword('');
-      setNewPassword('');
-    }
   };
 
   return (
@@ -359,7 +328,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <h2>User history — Live Excel (.csv) sheet</h2>
             </div>
             <p className="text-xs text-[var(--text-secondary)] mt-0.5 font-mono">
-              /api/export/{workspace.profile.username}.csv · {dataRows.length} rows synced
+              {workspace.profile.username || 'user'}_playground_history.csv · {dataRows.length} rows synced
             </p>
           </div>
 
@@ -492,75 +461,45 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </section>
 
-      {/* 3. Account & Password Security */}
+      {/* 3. Account & Cloud Security */}
       <section
-        aria-label="Account credentials"
+        aria-label="Account and cloud security"
         className="bg-white border border-[var(--border-subtle)] rounded-2xl p-6 space-y-4"
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-[15px] font-semibold text-[var(--text-primary)]">
-            <KeyRound className="w-4 h-4 text-[var(--accent)]" />
-            <h2>Account credentials (@{workspace.profile.username})</h2>
+            <ShieldCheck className="w-4 h-4 text-[var(--accent)]" />
+            <h2>Account & cloud security (@{workspace.profile.username})</h2>
           </div>
 
           <button
             type="button"
             onClick={onSignOut}
-            className="text-xs font-semibold text-[var(--accent)] hover:underline cursor-pointer self-start sm:self-auto"
+            className="px-3.5 py-1.5 rounded-xl bg-[var(--bg-input)] hover:bg-[var(--accent-soft)] text-xs font-semibold text-[var(--accent)] cursor-pointer self-start sm:self-auto"
           >
-            Switch account or create new user
+            Sign out of workspace
           </button>
         </div>
 
-        <form
-          onSubmit={handlePasswordChange}
-          className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end"
-        >
-          <div>
-            <label
-              htmlFor="settings-cur-pw"
-              className="block text-xs font-medium text-[var(--text-secondary)] mb-1"
-            >
-              Current password
-            </label>
-            <input
-              id="settings-cur-pw"
-              type="password"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              placeholder="Current password"
-              className="w-full h-9.5 px-3 rounded-xl bg-[var(--bg-input)] text-sm focus:outline-none focus:bg-white focus:border focus:border-[var(--accent)]"
-            />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <div className="px-4 py-3 rounded-xl bg-[var(--bg-input)] space-y-1">
+            <div className="text-[var(--text-secondary)]">Unique workspace handle</div>
+            <div className="font-mono font-semibold text-[var(--text-primary)]">
+              @{workspace.profile.username}
+            </div>
           </div>
 
-          <div>
-            <label
-              htmlFor="settings-new-pw"
-              className="block text-xs font-medium text-[var(--text-secondary)] mb-1"
-            >
-              New password
-            </label>
-            <input
-              id="settings-new-pw"
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="Min 4 characters"
-              className="w-full h-9.5 px-3 rounded-xl bg-[var(--bg-input)] text-sm focus:outline-none focus:bg-white focus:border focus:border-[var(--accent)]"
-            />
+          <div className="px-4 py-3 rounded-xl bg-[var(--bg-input)] space-y-1">
+            <div className="text-[var(--text-secondary)]">Verified email identity</div>
+            <div className="font-semibold text-[var(--text-primary)] truncate">
+              {workspace.profile.email || 'Local demo sandbox (not synced to cloud)'}
+            </div>
           </div>
+        </div>
 
-          <button
-            type="submit"
-            className="h-9.5 px-4 rounded-xl bg-white border border-[var(--border-subtle)] hover:border-[var(--accent)] text-xs font-semibold text-[var(--text-primary)] cursor-pointer"
-          >
-            Update password
-          </button>
-        </form>
-
-        {passwordStatus && (
-          <p className="text-xs text-[var(--text-secondary)]">{passwordStatus}</p>
-        )}
+        <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+          Protected by Google Sign-In and Zero-Trust Firestore security rules: one Gmail and one unique @username per user, zero stored passwords, and private real-time sync across phone and laptop.
+        </p>
       </section>
     </div>
   );

@@ -17,6 +17,10 @@ import {
   calculateUserStorageBytes,
   detectAttachmentBadge,
   mergeWorkspacesSafely,
+  findRecoverableLocalWorkspaces,
+  validateChosenUsername,
+  sanitizeWorkspaceForFirestore,
+  suggestUsernameFromIdentity,
 } from './playgroundLogic';
 import { createDemoWonderWorkspace, createEmptyWorkspace } from '../data/seedData';
 
@@ -184,5 +188,104 @@ test('detectAttachmentBadge categorizes PDF, PPTX, DOCX, images, and archives cl
     defaultCategory: 'Report / PDF',
   });
 });
+
+test('cross-device phone & laptop sync recovers all 5 phone projects even after empty laptop signup', () => {
+  // Phone localStorage has srinidhi's 5 projects + demo wonder
+  const phoneWs = createDemoWonderWorkspace();
+  phoneWs.profile.username = 'srinidhi';
+  phoneWs.profile.fullName = 'Srinidhi';
+  phoneWs.profile.email = 'srinidhi.x2008@gmail.com';
+  phoneWs.projects.push({
+    ...phoneWs.projects[0],
+    id: 'proj-srinidhi-5',
+    slug: 'ai-space-proto',
+    name: 'AI Space Prototype',
+    prototypeLink: 'https://a18nc7f0b9z1-d.space-z',
+    techStack: ['Z ai', 'Dribble'],
+    attachments: [],
+    updatedAt: '2026-11-02T04:20:00Z',
+  });
+
+  const phoneLocalAccounts = {
+    wonder: { username: 'wonder', workspace: createDemoWonderWorkspace() },
+    srinidhi: { username: 'srinidhi', workspace: phoneWs },
+  };
+
+  // Case 1: Laptop signed up first with 0 projects in cloud, then Phone signs in with same Gmail
+  const emptyCloudFromLaptop = createEmptyWorkspace(
+    'srinidhi',
+    'Srinidhi',
+    'srinidhi.x2008@gmail.com'
+  );
+  const candidatesOnPhone = findRecoverableLocalWorkspaces({
+    localAccounts: phoneLocalAccounts,
+    authEmail: 'srinidhi.x2008@gmail.com',
+    chosenUsername: 'srinidhi',
+    lastActiveLocalUser: 'srinidhi',
+  });
+  assert.equal(candidatesOnPhone.length, 1);
+
+  let syncedAfterPhoneLogin = emptyCloudFromLaptop;
+  for (const c of candidatesOnPhone) {
+    syncedAfterPhoneLogin = mergeWorkspacesSafely(c, syncedAfterPhoneLogin);
+  }
+  assert.equal(syncedAfterPhoneLogin.projects.length, 5);
+
+  // Case 2: Laptop later reloads with its 0-project local cache against the 5-project cloud state
+  const laptopLocalAccounts = {
+    wonder: { username: 'wonder', workspace: createDemoWonderWorkspace() },
+    srinidhi: {
+      username: 'srinidhi',
+      workspace: createEmptyWorkspace('srinidhi', 'srinidhi', 'srinidhi.x2008@gmail.com'),
+    },
+  };
+  const candidatesOnLaptop = findRecoverableLocalWorkspaces({
+    localAccounts: laptopLocalAccounts,
+    authEmail: 'srinidhi.x2008@gmail.com',
+    chosenUsername: 'srinidhi',
+    lastActiveLocalUser: 'srinidhi',
+  });
+  let syncedAfterLaptopReload = syncedAfterPhoneLogin;
+  for (const c of candidatesOnLaptop) {
+    syncedAfterLaptopReload = mergeWorkspacesSafely(c, syncedAfterLaptopReload);
+  }
+  assert.equal(syncedAfterLaptopReload.projects.length, 5);
+});
+
+test('validateChosenUsername and sanitizeWorkspaceForFirestore enforce strict blueprint rules', () => {
+  assert.equal(validateChosenUsername('wonder').valid, false);
+  assert.equal(validateChosenUsername('ab').valid, false);
+  assert.equal(validateChosenUsername('bad space').valid, false);
+  assert.equal(validateChosenUsername('srinidhi').valid, true);
+  assert.equal(
+    suggestUsernameFromIdentity({
+      email: 'srinidhi.x2008@gmail.com',
+      preferredLocalUsername: 'srinidhi',
+    }),
+    'srinidhi'
+  );
+
+  const dirty = createDemoWonderWorkspace();
+  dirty.projects[0].id = 'proj.with$invalid!chars';
+  dirty.projects[0].attachments = [
+    {
+      id: 'att.1',
+      name: 'Deck.pptx',
+      sizeBytes: 1024,
+      mimeType: 'application/vnd.ms-powerpoint',
+      uploadedAt: '2026-11-01',
+      dataUrl: 'data:application/octet-stream;base64,' + 'A'.repeat(500_000),
+    },
+  ];
+  const clean = sanitizeWorkspaceForFirestore(
+    dirty,
+    'srinidhi',
+    'srinidhi.x2008@gmail.com'
+  );
+  assert.match(clean.projects[0].id, /^[a-zA-Z0-9_-]+$/);
+  assert.equal(clean.projects[0].attachments[0].dataUrl, undefined);
+  assert.equal(clean.profile.username, 'srinidhi');
+});
+
 
 

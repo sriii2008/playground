@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Camera, Check, Download, ExternalLink, Upload, X } from 'lucide-react';
 import { UserProfile } from '../types';
 import { calculateAgeFromDob, normalizeExternalUrl } from '../utils/playgroundLogic';
-import { uploadWorkspaceFile } from '../utils/storageClient';
+import { compressAvatarFile, uploadWorkspaceFile } from '../utils/storageClient';
 import { triggerStoredFileDownload } from '../utils/fileVault';
 
 interface ProfileViewProps {
@@ -32,17 +32,18 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     setTimeout(() => setSavedNotice(false), 1600);
   };
 
-  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        patch({ avatarDataUrl: reader.result }, 'Updated profile picture');
-      }
-    };
-    reader.readAsDataURL(file);
     e.target.value = '';
+    if (!file) return;
+    try {
+      const compressed = await compressAvatarFile(file);
+      patch({ avatarDataUrl: compressed }, 'Updated profile picture');
+    } catch (err) {
+      setResumeUploadError(
+        err instanceof Error ? err.message : 'Could not update profile picture.'
+      );
+    }
   };
 
   const handleResumeUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {

@@ -623,4 +623,325 @@ export function mergeWorkspacesSafely(
   };
 }
 
+// ============================================================================
+// Firebase Blueprint Synchronicity & Zero-Data-Loss Migration Helpers
+// ============================================================================
+export const BLUEPRINT_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
+export const BLUEPRINT_USERNAME_REGEX = /^[a-zA-Z0-9_.-]+$/;
+export const BLUEPRINT_USERNAME_MIN = 3;
+export const BLUEPRINT_USERNAME_MAX = 32;
+
+export function sanitizeFirestoreId(rawId: string, prefix = 'item'): string {
+  const cleaned = String(rawId || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 128);
+  if (cleaned && BLUEPRINT_ID_REGEX.test(cleaned)) {
+    return cleaned;
+  }
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function validateChosenUsername(username: string): AuthValidationResult {
+  const clean = username.trim();
+  if (!clean) {
+    return { valid: false, error: 'Please choose a unique username.' };
+  }
+  if (
+    clean.length < BLUEPRINT_USERNAME_MIN ||
+    clean.length > BLUEPRINT_USERNAME_MAX ||
+    !BLUEPRINT_USERNAME_REGEX.test(clean)
+  ) {
+    return {
+      valid: false,
+      error: 'Username must be 3–32 characters (letters, numbers, _, ., -).',
+    };
+  }
+  if (clean.toLowerCase() === 'wonder') {
+    return {
+      valid: false,
+      error: '"wonder" is reserved for the read-only demo sandbox. Please pick your own username.',
+    };
+  }
+  return { valid: true };
+}
+
+export function suggestUsernameFromIdentity(params: {
+  email?: string | null;
+  displayName?: string | null;
+  preferredLocalUsername?: string | null;
+}): string {
+  const { email, displayName, preferredLocalUsername } = params;
+  if (preferredLocalUsername) {
+    const cleanPref = preferredLocalUsername.trim();
+    if (
+      cleanPref.toLowerCase() !== 'wonder' &&
+      cleanPref.length >= BLUEPRINT_USERNAME_MIN &&
+      cleanPref.length <= BLUEPRINT_USERNAME_MAX &&
+      BLUEPRINT_USERNAME_REGEX.test(cleanPref)
+    ) {
+      return cleanPref;
+    }
+  }
+
+  const emailPrefix = (email || '').split('@')[0] || '';
+  const fromEmail = emailPrefix
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]/g, '')
+    .slice(0, BLUEPRINT_USERNAME_MAX);
+  if (
+    fromEmail.length >= BLUEPRINT_USERNAME_MIN &&
+    fromEmail.toLowerCase() !== 'wonder'
+  ) {
+    return fromEmail;
+  }
+
+  const fromName = (displayName || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_.-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, BLUEPRINT_USERNAME_MAX);
+  if (fromName.length >= BLUEPRINT_USERNAME_MIN && fromName !== 'wonder') {
+    return fromName;
+  }
+
+  return `builder_${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export interface LegacyLocalRecordLike {
+  username: string;
+  workspace: UserWorkspaceData;
+}
+
+/**
+ * Finds local workspaces saved on the current browser (e.g. the user's 5 projects on her phone)
+ * that belong to this authenticated user so they can be merged non-destructively into Firestore.
+ */
+export function findRecoverableLocalWorkspaces(params: {
+  localAccounts: Record<string, LegacyLocalRecordLike>;
+  authEmail?: string | null;
+  chosenUsername?: string | null;
+  lastActiveLocalUser?: string | null;
+}): UserWorkspaceData[] {
+  const { localAccounts, authEmail, chosenUsername, lastActiveLocalUser } = params;
+  const normEmail = (authEmail || '').trim().toLowerCase();
+  const normChosen = (chosenUsername || '').trim().toLowerCase();
+  const normLastActive = (lastActiveLocalUser || '').trim().toLowerCase();
+
+  const nonDemoEntries = Object.values(localAccounts).filter(
+    (rec) =>
+      rec &&
+      rec.workspace &&
+      String(rec.username || '').trim().toLowerCase() !== 'wonder'
+  );
+
+  const matched: UserWorkspaceData[] = [];
+  const seen = new Set<UserWorkspaceData>();
+
+  const addIfNew = (ws: UserWorkspaceData) => {
+    if (!seen.has(ws)) {
+      seen.add(ws);
+      matched.push(ws);
+    }
+  };
+
+  for (const rec of nonDemoEntries) {
+    const recUser = String(rec.username || rec.workspace.profile?.username || '')
+      .trim()
+      .toLowerCase();
+    const recEmail = String(rec.workspace.profile?.email || '')
+      .trim()
+      .toLowerCase();
+
+    // 1. Exact email match
+    if (normEmail && recEmail && recEmail === normEmail) {
+      addIfNew(rec.workspace);
+      continue;
+    }
+
+    // 2. Exact username match (provided the local record wasn't explicitly tied to a different email)
+    if (normChosen && recUser === normChosen && (!recEmail || recEmail === normEmail)) {
+      addIfNew(rec.workspace);
+      continue;
+    }
+
+    // 3. Previously signed-in local user on this personal browser
+    if (
+      normLastActive &&
+      normLastActive !== '__signed_out__' &&
+      normLastActive !== 'wonder' &&
+      recUser === normLastActive &&
+      (!recEmail || recEmail === normEmail)
+    ) {
+      addIfNew(rec.workspace);
+    }
+  }
+
+  // 4. Single personal workspace on this device with blank or matching email
+  if (matched.length === 0 && nonDemoEntries.length === 1) {
+    const sole = nonDemoEntries[0];
+    const soleEmail = String(sole.workspace.profile?.email || '')
+      .trim()
+      .toLowerCase();
+    if (!soleEmail || soleEmail === normEmail) {
+      addIfNew(sole.workspace);
+    }
+  }
+
+  return matched;
+}
+
+export function sanitizeWorkspaceForFirestore(
+  ws: UserWorkspaceData,
+  canonicalUsername: string,
+  canonicalEmail: string
+): UserWorkspaceData {
+  const validThemes = ['lavender', 'mint', 'rose', 'sky', 'butter'] as const;
+  const theme = validThemes.includes(ws.theme as (typeof validThemes)[number])
+    ? ws.theme
+    : 'lavender';
+
+  const usedProjectIds = new Set<string>();
+  const projectIdRemap = new Map<string, string>();
+
+  const sanitizedProjects: ProjectItem[] = (ws.projects || []).map((p, idx) => {
+    let cleanId = sanitizeFirestoreId(p.id, `proj_${idx}`);
+    while (usedProjectIds.has(cleanId)) {
+      cleanId = `${cleanId.slice(0, 118)}_${idx}`;
+    }
+    usedProjectIds.add(cleanId);
+    projectIdRemap.set(p.id, cleanId);
+
+    const validStatuses: ProjectStatus[] = ['Planned', 'Ongoing', 'Completed', 'Published'];
+    const status: ProjectStatus = validStatuses.includes(p.status) ? p.status : 'Planned';
+    const progress = Math.max(0, Math.min(100, Math.round(Number(p.progress) || 0)));
+    const rawCompletedMonth =
+      typeof p.completedMonth === 'number' && Number.isFinite(p.completedMonth)
+        ? Math.max(0, Math.min(11, Math.round(p.completedMonth)))
+        : undefined;
+
+    return {
+      id: cleanId,
+      slug: (p.slug || slugifyProjectName(p.name || 'project')).slice(0, 140),
+      name: (p.name || 'Untitled Project').trim().slice(0, 160) || 'Untitled Project',
+      domain: (p.domain || 'General').slice(0, 100),
+      purpose: (p.purpose || '').slice(0, 2000),
+      status,
+      progress,
+      problemStatement: (p.problemStatement || '').slice(0, 5000),
+      solution: (p.solution || '').slice(0, 5000),
+      githubLink: (p.githubLink || '').slice(0, 500),
+      prototypeLink: (p.prototypeLink || '').slice(0, 500),
+      documentationLink: (p.documentationLink || '').slice(0, 500),
+      techStack: (p.techStack || [])
+        .map((t) => String(t || '').trim().slice(0, 80))
+        .filter(Boolean)
+        .slice(0, 30),
+      teamName: (p.teamName || 'Solo').slice(0, 120),
+      teamMembers: (p.teamMembers || []).slice(0, 25).map((m, mIdx) => ({
+        id: sanitizeFirestoreId(m.id, `tm_${mIdx}`),
+        name: String(m.name || '').slice(0, 120),
+        role: String(m.role || '').slice(0, 80),
+        email: String(m.email || '').slice(0, 254),
+      })),
+      // Omit inline base64 dataUrl in Firestore documents (1MB doc limit); binary stays in IndexedDB / upload storage
+      attachments: (p.attachments || []).slice(0, 50).map((att, aIdx) => ({
+        id: sanitizeFirestoreId(att.id, `att_${aIdx}`),
+        name: (String(att.name || 'document').trim().slice(0, 260)) || 'document',
+        sizeBytes: Math.max(0, Math.min(MAX_FILE_BYTES, Math.round(Number(att.sizeBytes) || 0))),
+        mimeType: String(att.mimeType || 'application/octet-stream').slice(0, 120),
+        uploadedAt: String(att.uploadedAt || new Date().toISOString().slice(0, 10)).slice(0, 40),
+        category: String(att.category || '').slice(0, 60),
+        storageId: String(att.storageId || '').slice(0, 128),
+        fileUrl: String(att.fileUrl || '').slice(0, 500),
+      })),
+      hackathonName: (p.hackathonName || '').slice(0, 160),
+      hackathonDeadline: (p.hackathonDeadline || '').slice(0, 32),
+      hackathonUpdates: (p.hackathonUpdates || []).slice(0, 50).map((hu, hIdx) => ({
+        id: sanitizeFirestoreId(hu.id, `hu_${hIdx}`),
+        hackathonName: String(hu.hackathonName || '').slice(0, 160),
+        stage: (['Idea', 'Prototype Ready', 'Submitted', 'Finalist', 'Winner'].includes(hu.stage)
+          ? hu.stage
+          : 'Idea'),
+        note: String(hu.note || '').slice(0, 1000),
+        date: String(hu.date || '').slice(0, 40),
+      })),
+      completedMonth: rawCompletedMonth,
+      updatedAt: String(p.updatedAt || new Date().toISOString()).slice(0, 40),
+    };
+  });
+
+  const sanitizedCertificates = (ws.certificates || []).map((c, idx) => ({
+    id: sanitizeFirestoreId(c.id, `cert_${idx}`),
+    title: (String(c.title || 'Certificate').trim().slice(0, 200)) || 'Certificate',
+    issuer: String(c.issuer || '').slice(0, 160),
+    date: String(c.date || '').slice(0, 32),
+    format: (['PDF', 'PNG', 'JPG'].includes(c.format) ? c.format : 'PDF') as UserWorkspaceData['certificates'][number]['format'],
+    sizeBytes: Math.max(0, Math.min(MAX_FILE_BYTES, Math.round(Number(c.sizeBytes) || 0))),
+    storageId: String(c.storageId || '').slice(0, 128),
+    fileUrl: String(c.fileUrl || '').slice(0, 500),
+    fileName: String(c.fileName || '').slice(0, 260),
+  }));
+
+  const sanitizedReminders: ReminderItem[] = (ws.reminders || []).map((r, idx) => {
+    const mappedProjId = r.projectId ? projectIdRemap.get(r.projectId) || sanitizeFirestoreId(r.projectId, 'proj') : '';
+    const linkedExists = mappedProjId && usedProjectIds.has(mappedProjId);
+    return {
+      id: sanitizeFirestoreId(r.id, `rem_${idx}`),
+      text: (String(r.text || 'Task').trim().slice(0, 400)) || 'Task',
+      projectId: linkedExists ? mappedProjId : undefined,
+      projectName: String(r.projectName || 'General').slice(0, 160),
+      completed: Boolean(r.completed),
+      createdAt: String(r.createdAt || new Date().toISOString()).slice(0, 40),
+    };
+  });
+
+  const validLogCategories = ['Project', 'Hackathon', 'Certificate', 'Reminder', 'Profile', 'Auth'] as const;
+  const sanitizedHistory = (ws.historyLog || []).slice(0, 100).map((h, idx) => ({
+    id: sanitizeFirestoreId(h.id, `log_${idx}`),
+    timestamp: (String(h.timestamp || new Date().toISOString().slice(0, 16).replace('T', ' ')).trim().slice(0, 40)) || '2026-11-01 00:00',
+    action: (String(h.action || 'Activity').trim().slice(0, 120)) || 'Activity',
+    category: validLogCategories.includes(h.category as (typeof validLogCategories)[number])
+      ? h.category
+      : 'Project',
+    details: String(h.details || '').slice(0, 500),
+  }));
+
+  const safeAvatar =
+    ws.profile?.avatarDataUrl && ws.profile.avatarDataUrl.length <= 120000
+      ? ws.profile.avatarDataUrl
+      : undefined;
+
+  return {
+    theme,
+    profile: {
+      username: canonicalUsername,
+      fullName: String(ws.profile?.fullName || canonicalUsername).slice(0, 120),
+      dob: String(ws.profile?.dob || '').slice(0, 20),
+      age: String(ws.profile?.age || '').slice(0, 10),
+      email: String(canonicalEmail || ws.profile?.email || '').slice(0, 254),
+      linkedin: String(ws.profile?.linkedin || '').slice(0, 500),
+      github: String(ws.profile?.github || '').slice(0, 500),
+      portfolio: String(ws.profile?.portfolio || '').slice(0, 500),
+      resumeLink: String(ws.profile?.resumeLink || '').slice(0, 500),
+      resumeFileName: String(ws.profile?.resumeFileName || '').slice(0, 260),
+      resumeSizeBytes: Math.max(
+        0,
+        Math.min(MAX_FILE_BYTES, Math.round(Number(ws.profile?.resumeSizeBytes) || 0))
+      ),
+      resumeStorageId: String(ws.profile?.resumeStorageId || '').slice(0, 128),
+      resumeFileUrl: String(ws.profile?.resumeFileUrl || '').slice(0, 500),
+      avatarDataUrl: safeAvatar,
+    },
+    projects: sanitizedProjects,
+    certificates: sanitizedCertificates,
+    reminders: sanitizedReminders,
+    historyLog: sanitizedHistory,
+  };
+}
+
+
 

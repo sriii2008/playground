@@ -5,18 +5,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createDemoWonderWorkspace, createEmptyWorkspace } from './src/data/seedData.ts';
 import {
-  calculateProjectStorageBytes,
-  calculateUserStorageBytes,
-  generateUserHistoryCsv,
   MAX_FILE_BYTES,
   MAX_PROJECT_BYTES,
   MAX_USER_BYTES,
-  validateAuthCredentials,
   validateUploadQuota,
 } from './src/utils/playgroundLogic.ts';
-import type { StoredAccount, UserWorkspaceData } from './src/types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,10 +31,9 @@ function resolveWritableDataDir(): string {
 }
 
 const DATA_DIR = resolveWritableDataDir();
-const CSV_DIR = path.join(DATA_DIR, 'csv');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
 const UPLOADS_INDEX_FILE = path.join(DATA_DIR, 'uploads_index.json');
+const LEGACY_ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
 
 interface StoredFileMeta {
   storageId: string;
@@ -53,69 +46,22 @@ interface StoredFileMeta {
   uploadedAt: string;
 }
 
-function hashPassword(password: string): string {
-  return crypto.createHash('sha256').update(`playground_salt_v1:${password}`).digest('hex');
-}
-
-function ensureStorageInitialized(): Record<string, StoredAccount> {
+function ensureVaultInitialized(): Record<string, StoredFileMeta> {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(CSV_DIR)) {
-    fs.mkdirSync(CSV_DIR, { recursive: true });
   }
   if (!fs.existsSync(UPLOADS_DIR)) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   }
-
-  if (fs.existsSync(ACCOUNTS_FILE)) {
+  // Security hardening: remove legacy disk accounts.json so no PII or password hashes rest on disk
+  if (fs.existsSync(LEGACY_ACCOUNTS_FILE)) {
     try {
-      const raw = fs.readFileSync(ACCOUNTS_FILE, 'utf-8');
-      const parsed = JSON.parse(raw) as Record<string, StoredAccount>;
-      if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-        return parsed;
-      }
+      fs.unlinkSync(LEGACY_ACCOUNTS_FILE);
     } catch {
-      // Re-seed if corrupted
+      // ignore
     }
   }
 
-  const demoWorkspace = createDemoWonderWorkspace();
-  const initialAccounts: Record<string, StoredAccount> = {
-    wonder: {
-      username: 'wonder',
-      passwordHash: hashPassword('wonder123'),
-      createdAt: '2026-08-01T09:00:00Z',
-      workspace: demoWorkspace,
-    },
-  };
-
-  persistAccounts(initialAccounts);
-  writeUserCsvFile('wonder', demoWorkspace);
-  return initialAccounts;
-}
-
-function persistAccounts(accounts: Record<string, StoredAccount>): void {
-  try {
-    fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2), 'utf-8');
-  } catch (err) {
-    console.warn('Could not persist accounts file:', err);
-  }
-}
-
-function writeUserCsvFile(username: string, workspace: UserWorkspaceData): string {
-  const safeName = username.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
-  const csvPath = path.join(CSV_DIR, `${safeName}_user_history.csv`);
-  const csvBody = '\uFEFF' + generateUserHistoryCsv(workspace);
-  try {
-    fs.writeFileSync(csvPath, csvBody, 'utf-8');
-  } catch (err) {
-    console.warn('Could not write user CSV file:', err);
-  }
-  return csvPath;
-}
-
-function loadUploadsIndex(): Record<string, StoredFileMeta> {
   if (fs.existsSync(UPLOADS_INDEX_FILE)) {
     try {
       const raw = fs.readFileSync(UPLOADS_INDEX_FILE, 'utf-8');
@@ -136,6 +82,25 @@ function saveUploadsIndex(index: Record<string, StoredFileMeta>): void {
   }
 }
 
+function computeDiskBytesForUser(
+  uploadsIndex: Record<string, StoredFileMeta>,
+  username: string
+): { userBytes: number; projectBytesById: Record<string, number> } {
+  const norm = username.trim().toLowerCase();
+  let userBytes = 0;
+  const projectBytesById: Record<string, number> = {};
+
+  for (const meta of Object.values(uploadsIndex)) {
+    if (String(meta.username || '').trim().toLowerCase() !== norm) continue;
+    userBytes += meta.sizeBytes || 0;
+    if (meta.projectId) {
+      projectBytesById[meta.projectId] =
+        (projectBytesById[meta.projectId] || 0) + (meta.sizeBytes || 0);
+    }
+  }
+  return { userBytes, projectBytesById };
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
@@ -144,55 +109,15 @@ async function startServer() {
     res.status(200).json({ ok: true });
   });
 
-  let accounts = ensureStorageInitialized();
-  let uploadsIndex = loadUploadsIndex();
-
-  const findAccountKey = (username: string): string | undefined =>
-    Object.keys(accounts).find((k) => k.toLowerCase() === username.trim().toLowerCase());
-
-  const getOrProvisionAccount = (
-    rawUsername: string,
-    incomingWorkspace?: UserWorkspaceData,
-    rawPassword?: string
-  ): StoredAccount | null => {
-    const clean = rawUsername.trim();
-    if (!clean) return null;
-    const existingKey = findAccountKey(clean);
-    if (existingKey) {
-      if (rawPassword) {
-        accounts[existingKey].passwordHash = hashPassword(rawPassword);
-      }
-      return accounts[existingKey];
-    }
-
-    // Cloud Run cold-start auto-rehydration: create account entry without wiping client data
-    const workspace =
-      incomingWorkspace && incomingWorkspace.profile
-        ? {
-            ...incomingWorkspace,
-            profile: { ...incomingWorkspace.profile, username: clean },
-          }
-        : createEmptyWorkspace(clean, clean, '');
-
-    const key = clean.toLowerCase();
-    accounts[key] = {
-      username: clean,
-      passwordHash: hashPassword(rawPassword || 'wonder123'),
-      createdAt: new Date().toISOString(),
-      workspace,
-    };
-    persistAccounts(accounts);
-    writeUserCsvFile(clean, workspace);
-    return accounts[key];
-  };
+  const uploadsIndex = ensureVaultInitialized();
 
   // Binary file upload endpoint (supports single-shot and 16 MB chunked uploads up to 50 MB)
   app.post(
     '/api/uploads/:username',
     express.raw({ type: 'application/octet-stream', limit: '30mb' }),
     (req: Request, res: Response) => {
-      const account = getOrProvisionAccount(String(req.params.username || ''));
-      if (!account) {
+      const cleanUsername = String(req.params.username || '').trim();
+      if (!cleanUsername || !/^[a-zA-Z0-9_.-]{1,64}$/.test(cleanUsername)) {
         res.status(400).json({ error: 'Valid username is required for file upload.' });
         return;
       }
@@ -214,22 +139,19 @@ async function startServer() {
           : bodyBuf.length;
 
       if (chunkIndex === 0) {
-        const serverUserBytes = calculateUserStorageBytes(account.workspace);
+        const diskStats = computeDiskBytesForUser(uploadsIndex, cleanUsername);
         const currentUserBytes =
           Number.isFinite(headerUserBytes) && headerUserBytes >= 0
-            ? Math.max(serverUserBytes, headerUserBytes)
-            : serverUserBytes;
+            ? Math.max(diskStats.userBytes, headerUserBytes)
+            : diskStats.userBytes;
 
-        const targetProject = projectId
-          ? account.workspace.projects.find((p) => p.id === projectId)
-          : undefined;
-        const serverProjectBytes = targetProject
-          ? calculateProjectStorageBytes(targetProject)
+        const diskProjectBytes = projectId
+          ? diskStats.projectBytesById[projectId]
           : undefined;
         const currentProjectBytes =
           Number.isFinite(headerProjectBytes) && headerProjectBytes >= 0
-            ? Math.max(serverProjectBytes ?? 0, headerProjectBytes)
-            : serverProjectBytes;
+            ? Math.max(diskProjectBytes ?? 0, headerProjectBytes)
+            : diskProjectBytes;
 
         const quotaCheck = validateUploadQuota({
           fileSizeBytes: effectiveTotalSize,
@@ -243,7 +165,7 @@ async function startServer() {
         }
       }
 
-      const safeUser = account.username.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
+      const safeUser = cleanUsername.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
       const userUploadDir = path.join(UPLOADS_DIR, safeUser);
       if (!fs.existsSync(userUploadDir)) {
         fs.mkdirSync(userUploadDir, { recursive: true });
@@ -252,7 +174,7 @@ async function startServer() {
       const storageId =
         requestedStorageId && /^[a-zA-Z0-9_.-]+$/.test(requestedStorageId)
           ? requestedStorageId
-          : `file_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+          : `file_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
       const safeFile = rawName.replace(/[^a-zA-Z0-9_.-]/g, '_');
       const diskFileName = `${storageId}_${safeFile}`;
       const fullDiskPath = path.join(userUploadDir, diskFileName);
@@ -278,7 +200,7 @@ async function startServer() {
       if (isFinalChunk) {
         const meta: StoredFileMeta = {
           storageId,
-          username: account.username,
+          username: cleanUsername,
           projectId,
           fileName: rawName,
           mimeType,
@@ -297,27 +219,30 @@ async function startServer() {
         sizeBytes: currentSizeOnDisk,
         complete: isFinalChunk,
         uploadedAt: new Date().toISOString().slice(0, 10),
-        fileUrl: `/api/files/${encodeURIComponent(account.username)}/${encodeURIComponent(
+        fileUrl: `/api/files/${encodeURIComponent(cleanUsername)}/${encodeURIComponent(
           storageId
         )}`,
       });
     }
   );
 
-  app.use(express.json({ limit: '60mb' }));
+  app.use(express.json({ limit: '10mb' }));
+
+  // Explicitly block any legacy account enumeration endpoints
+  app.get('/api/accounts', (_req: Request, res: Response) => {
+    res.status(403).json({ error: 'Public account enumeration is disabled.' });
+  });
 
   app.get('/api/storage/status/:username', (req: Request, res: Response) => {
-    const account = getOrProvisionAccount(String(req.params.username || ''));
-    if (!account) {
+    const cleanUsername = String(req.params.username || '').trim();
+    if (!cleanUsername) {
       res.status(400).json({ error: 'Username is required.' });
       return;
     }
-    const userUsedBytes = calculateUserStorageBytes(account.workspace);
-    const projectBytesById: Record<string, number> = {};
-    for (const p of account.workspace.projects) {
-      projectBytesById[p.id] = calculateProjectStorageBytes(p);
-    }
-
+    const { userBytes, projectBytesById } = computeDiskBytesForUser(
+      uploadsIndex,
+      cleanUsername
+    );
     const geminiKey = process.env.GEMINI_API_KEY || '';
     const apiKeyAttached = Boolean(geminiKey && geminiKey !== 'MY_GEMINI_API_KEY');
 
@@ -330,8 +255,8 @@ async function startServer() {
         maxUserBytes: MAX_USER_BYTES,
       },
       usage: {
-        userUsedBytes,
-        remainingUserBytes: Math.max(0, MAX_USER_BYTES - userUsedBytes),
+        userUsedBytes: userBytes,
+        remainingUserBytes: Math.max(0, MAX_USER_BYTES - userBytes),
         projectBytesById,
       },
     });
@@ -380,152 +305,6 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  app.get('/api/accounts', (_req: Request, res: Response) => {
-    const users = Object.values(accounts).map((acc) => ({
-      username: acc.username,
-      fullName: acc.workspace.profile.fullName,
-      avatarDataUrl: acc.workspace.profile.avatarDataUrl || '',
-      projectCount: acc.workspace.projects.length,
-      createdAt: acc.createdAt,
-    }));
-    res.json({ users });
-  });
-
-  app.post('/api/auth/signup', (req: Request, res: Response) => {
-    const { username = '', password = '', fullName = '', email = '', avatarDataUrl } = req.body || {};
-    const existingNames = Object.values(accounts).map((a) => a.username);
-    const check = validateAuthCredentials('signup', String(username), String(password), existingNames);
-    if (!check.valid) {
-      res.status(400).json({ error: check.error });
-      return;
-    }
-
-    const cleanUsername = String(username).trim();
-    const workspace = createEmptyWorkspace(
-      cleanUsername,
-      String(fullName || cleanUsername),
-      String(email || ''),
-      typeof avatarDataUrl === 'string' && avatarDataUrl ? avatarDataUrl : undefined
-    );
-
-    const key = cleanUsername.toLowerCase();
-    accounts[key] = {
-      username: cleanUsername,
-      passwordHash: hashPassword(String(password)),
-      createdAt: new Date().toISOString(),
-      workspace,
-    };
-
-    persistAccounts(accounts);
-    writeUserCsvFile(cleanUsername, workspace);
-
-    res.status(201).json({
-      username: cleanUsername,
-      workspace,
-    });
-  });
-
-  app.post('/api/auth/signin', (req: Request, res: Response) => {
-    const { username = '', password = '' } = req.body || {};
-    const key = findAccountKey(String(username));
-    if (!key) {
-      res.status(401).json({ error: 'Account not found. Check your username or sign up.' });
-      return;
-    }
-
-    const account = accounts[key];
-    // Allow demo account quick login when demoFlag is passed or valid password
-    if (account.passwordHash !== hashPassword(String(password))) {
-      res.status(401).json({ error: 'Incorrect password. Please try again.' });
-      return;
-    }
-
-    writeUserCsvFile(account.username, account.workspace);
-    res.json({
-      username: account.username,
-      workspace: account.workspace,
-    });
-  });
-
-  app.post('/api/auth/password', (req: Request, res: Response) => {
-    const { username = '', currentPassword = '', newPassword = '' } = req.body || {};
-    const key = findAccountKey(String(username));
-    if (!key) {
-      res.status(404).json({ error: 'Account not found.' });
-      return;
-    }
-    const account = accounts[key];
-    if (account.passwordHash !== hashPassword(String(currentPassword))) {
-      res.status(401).json({ error: 'Current password does not match.' });
-      return;
-    }
-    if (!newPassword || String(newPassword).length < 4) {
-      res.status(400).json({ error: 'New password must be at least 4 characters.' });
-      return;
-    }
-    account.passwordHash = hashPassword(String(newPassword));
-    persistAccounts(accounts);
-    res.json({ ok: true });
-  });
-
-  app.get('/api/workspace/:username', (req: Request, res: Response) => {
-    const key = findAccountKey(String(req.params.username || ''));
-    if (!key) {
-      res.status(404).json({ error: 'User workspace not found.' });
-      return;
-    }
-    res.json({
-      username: accounts[key].username,
-      workspace: accounts[key].workspace,
-    });
-  });
-
-  app.put('/api/workspace/:username', (req: Request, res: Response) => {
-    const incomingWorkspace = req.body?.workspace as UserWorkspaceData | undefined;
-    const rawPassword =
-      typeof req.body?.password === 'string' && req.body.password
-        ? req.body.password
-        : undefined;
-
-    if (!incomingWorkspace || !incomingWorkspace.profile) {
-      res.status(400).json({ error: 'Invalid workspace payload.' });
-      return;
-    }
-
-    const account = getOrProvisionAccount(
-      String(req.params.username || ''),
-      incomingWorkspace,
-      rawPassword
-    );
-    if (!account) {
-      res.status(400).json({ error: 'Valid username is required.' });
-      return;
-    }
-
-    // Preserve immutable unique username
-    incomingWorkspace.profile.username = account.username;
-    account.workspace = incomingWorkspace;
-    persistAccounts(accounts);
-    writeUserCsvFile(account.username, incomingWorkspace);
-
-    res.json({ ok: true });
-  });
-
-  app.get('/api/export/:username.csv', (req: Request, res: Response) => {
-    const account = getOrProvisionAccount(String(req.params.username || ''));
-    if (!account) {
-      res.status(404).send('User not found');
-      return;
-    }
-    const csvPath = writeUserCsvFile(account.username, account.workspace);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${account.username}_playground_history.csv"`
-    );
-    res.sendFile(csvPath);
-  });
-
   const distPath = path.join(__dirname, 'dist');
   const distIndexPath = path.join(distPath, 'index.html');
   const isDevLifecycle =
@@ -548,7 +327,6 @@ async function startServer() {
       res.sendFile(distIndexPath);
     });
   } else {
-    // Bind port 3000 immediately while Vite initializes in background so Nginx never sees 502/503
     const disableHmr = process.env.DISABLE_HMR === 'true';
     const viteMiddlewarePromise = import('vite').then(({ createServer: createViteServer }) =>
       createViteServer({

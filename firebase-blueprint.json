@@ -1,0 +1,515 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Master user account record linking a single Google UID to a globally unique immutable username and workspace theme without PII.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID owning this account.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "description": "Display handle chosen once by the user.",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_.\\-]+$"
+        },
+        "usernameLower": {
+          "type": "string",
+          "description": "Lowercase canonical username matching /usernames/{usernameLower}.",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_.\\-]+$"
+        },
+        "theme": {
+          "type": "string",
+          "description": "Active pastel workspace theme.",
+          "maxLength": 16,
+          "enum": ["lavender", "mint", "rose", "sky", "butter"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of account creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last account preference update."
+        }
+      },
+      "required": ["ownerId", "username", "usernameLower", "theme", "createdAt", "updatedAt"]
+    },
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Global uniqueness lock ensuring no two accounts ever share the same username.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID that permanently owns this username.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "description": "Original cased username.",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_.\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the username was claimed."
+        }
+      },
+      "required": ["ownerId", "username", "createdAt"]
+    },
+    "PrivateUserProfile": {
+      "title": "PrivateUserProfile",
+      "description": "Isolated owner-only PII vault containing email, DOB, links, resume metadata, and compact avatar.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_.\\-]+$"
+        },
+        "fullName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "dob": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "age": {
+          "type": "string",
+          "maxLength": 10
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254
+        },
+        "linkedin": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "github": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "portfolio": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "resumeLink": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "resumeFileName": {
+          "type": "string",
+          "maxLength": 260
+        },
+        "resumeSizeBytes": {
+          "type": "number",
+          "description": "Byte size of attached resume (0..52428800)."
+        },
+        "resumeStorageId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "resumeFileUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "avatarDataUrl": {
+          "type": "string",
+          "maxLength": 120000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "username",
+        "fullName",
+        "dob",
+        "age",
+        "email",
+        "linkedin",
+        "github",
+        "portfolio",
+        "resumeLink",
+        "resumeFileName",
+        "resumeSizeBytes",
+        "resumeStorageId",
+        "resumeFileUrl",
+        "avatarDataUrl",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProjectDoc": {
+      "title": "ProjectDoc",
+      "description": "User project record containing links, problem/solution notes, bounded tech stack, team, file metadata, and hackathon updates.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "domain": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "purpose": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "workflowStage": {
+          "type": "string",
+          "maxLength": 20,
+          "enum": ["Planned", "Ongoing", "Completed", "Published"]
+        },
+        "progress": {
+          "type": "number"
+        },
+        "problemStatement": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "solution": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "githubLink": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "prototypeLink": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "documentationLink": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "techStack": {
+          "type": "array",
+          "description": "Bounded list of up to 30 tech stack tags."
+        },
+        "teamName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "teamMembers": {
+          "type": "array",
+          "description": "Bounded list of up to 25 project team members."
+        },
+        "attachments": {
+          "type": "array",
+          "description": "Bounded list of up to 50 file attachment metadata records."
+        },
+        "hackathonName": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "hackathonDeadline": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "hackathonUpdates": {
+          "type": "array",
+          "description": "Bounded list of up to 50 hackathon milestone logs."
+        },
+        "completedMonth": {
+          "type": "number",
+          "description": "Month bucket 0..11 or -1 when unset."
+        },
+        "clientUpdatedAt": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "slug",
+        "name",
+        "domain",
+        "purpose",
+        "workflowStage",
+        "progress",
+        "problemStatement",
+        "solution",
+        "githubLink",
+        "prototypeLink",
+        "documentationLink",
+        "techStack",
+        "teamName",
+        "teamMembers",
+        "attachments",
+        "hackathonName",
+        "hackathonDeadline",
+        "hackathonUpdates",
+        "completedMonth",
+        "clientUpdatedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CertificateDoc": {
+      "title": "CertificateDoc",
+      "description": "Course or hackathon certificate metadata owned by a user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "issuer": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "date": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "format": {
+          "type": "string",
+          "maxLength": 8,
+          "enum": ["PDF", "PNG", "JPG"]
+        },
+        "sizeBytes": {
+          "type": "number"
+        },
+        "storageId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "fileUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "fileName": {
+          "type": "string",
+          "maxLength": 260
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "title",
+        "issuer",
+        "date",
+        "format",
+        "sizeBytes",
+        "storageId",
+        "fileUrl",
+        "fileName",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ReminderDoc": {
+      "title": "ReminderDoc",
+      "description": "To-do reminder optionally linked to an existing user project.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "projectName": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "clientCreatedAt": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "text",
+        "projectId",
+        "projectName",
+        "completed",
+        "clientCreatedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "HistoryLogDoc": {
+      "title": "HistoryLogDoc",
+      "description": "Immutable activity history entry used for Excel (.csv) export.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "entryTime": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 24,
+          "enum": ["Project", "Hackathon", "Certificate", "Reminder", "Profile", "Auth"]
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "id", "entryTime", "action", "category", "details", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserAccount",
+      "description": "Master account document keyed by Firebase Auth UID (1 Google email = 1 UID = 1 account)."
+    },
+    "/usernames/{usernameLower}": {
+      "schema": "UsernameClaim",
+      "description": "Global unique username registry ensuring 1 username = 1 ownerId."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": "PrivateUserProfile",
+      "description": "Isolated PII profile vault readable and writable solely by the verified account owner."
+    },
+    "/users/{userId}/projects/{projectId}": {
+      "schema": "ProjectDoc",
+      "description": "Owner-only subcollection of user projects and hackathon updates."
+    },
+    "/users/{userId}/certificates/{certId}": {
+      "schema": "CertificateDoc",
+      "description": "Owner-only subcollection of certificates."
+    },
+    "/users/{userId}/reminders/{reminderId}": {
+      "schema": "ReminderDoc",
+      "description": "Owner-only subcollection of project reminders."
+    },
+    "/users/{userId}/history/{logId}": {
+      "schema": "HistoryLogDoc",
+      "description": "Append-only owner activity history log."
+    }
+  }
+}
